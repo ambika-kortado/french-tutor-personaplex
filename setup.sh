@@ -34,9 +34,9 @@ pip install -r requirements.txt
 if [ ! -d "personaplex" ]; then
     echo "Cloning PersonaPlex..."
     git lfs install
-    git clone https://huggingface.co/nvidia/PersonaPlex personaplex || {
+    git clone https://huggingface.co/nvidia/personaplex-7b-v1 personaplex || {
         echo "Failed to clone PersonaPlex. Make sure HF_TOKEN is set correctly."
-        echo "You may need to accept the model license at https://huggingface.co/nvidia/PersonaPlex"
+        echo "You may need to accept the model license at https://huggingface.co/nvidia/personaplex-7b-v1"
     }
 fi
 
