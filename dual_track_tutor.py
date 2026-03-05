@@ -447,17 +447,18 @@ class Arbitrator:
 
         session.current_tasks = [personaplex_task, llm_task]
 
-        # Step 3: Wait for LLM with timeout
-        try:
-            llm_result = await asyncio.wait_for(
-                llm_task,
-                timeout=LLM_TIMEOUT
-            )
+        # Step 3: Wait for LLM with timeout (use asyncio.wait to avoid cancellation)
+        done, pending = await asyncio.wait(
+            [llm_task],
+            timeout=LLM_TIMEOUT
+        )
 
+        if llm_task in done:
             # LLM responded in time! Cancel PersonaPlex
             personaplex_task.cancel()
 
-            result["claude_response"] = llm_result  # Keep key for logging compatibility
+            llm_result = llm_task.result()
+            result["claude_response"] = llm_result
             result["claude_used"] = True
             result["spoken_response"] = llm_result["text"]
 
@@ -474,7 +475,7 @@ class Arbitrator:
             # Update conversation history
             session.add_assistant_message(llm_result["text"])
 
-        except asyncio.TimeoutError:
+        else:
             # LLM is slow - use PersonaPlex filler first
             print(f"[Arbitrator] LLM timeout after {LLM_TIMEOUT}s, using filler", flush=True)
 
