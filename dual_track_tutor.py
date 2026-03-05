@@ -245,10 +245,18 @@ class LLMTrack:
 class TTSEngine:
     """Text-to-Speech using Moshi for PersonaPlex voice quality"""
 
+    # Available voices from kyutai/tts-voices repo
+    VOICES = [
+        "expresso/ex03-ex01_calm_001_channel1_1143s.wav",
+        "expresso/ex03-ex01_happy_001_channel1_334s.wav",
+        "expresso/ex01-ex02_default_001_channel1_168s.wav",
+    ]
+
     def __init__(self):
         self.is_loaded = False
         self.model = None
         self.use_moshi = False
+        self.voice = self.VOICES[0]  # Default calm voice
 
     async def load(self) -> bool:
         """Load TTS engine - use Moshi on GPU, browser TTS on CPU"""
@@ -287,13 +295,13 @@ class TTSEngine:
         try:
             import torch
 
-            # Use Moshi TTS - voice can be "main" or path to voice file
-            print(f"[TTS] Synthesizing: {text[:50]}...", flush=True)
+            # Use Moshi TTS with voice from kyutai/tts-voices repo
+            print(f"[TTS] Synthesizing with voice {self.voice}: {text[:50]}...", flush=True)
             with torch.no_grad():
                 audio_tensors = await asyncio.to_thread(
                     self.model.simple_generate,
                     text=text,
-                    voice="main",  # Use default voice
+                    voice=self.voice,
                     cfg_coef=2.0,
                     show_progress=False
                 )
@@ -394,7 +402,8 @@ class Arbitrator:
         session: SessionState,
         send_audio_callback,
         send_status_callback,
-        send_json_callback=None
+        send_json_callback=None,
+        sample_rate: int = 44100
     ) -> Dict[str, Any]:
         """
         Process a user turn with dual-track arbitration.
@@ -417,7 +426,7 @@ class Arbitrator:
 
         # Step 1: Transcribe user audio (STT)
         await send_status_callback("Transcribing...")
-        user_text = await self.stt.transcribe(audio)
+        user_text = await self.stt.transcribe(audio, sample_rate=sample_rate)
         result["user_text"] = user_text
 
         if not user_text.strip():
@@ -723,13 +732,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 print(f"[Audio] Too short, ignoring", flush=True)
                 continue
 
-            # Process through arbitrator
+            # Process through arbitrator (pass sample rate for STT)
             await arbitrator.process_user_turn(
                 audio,
                 session_state,
                 send_audio,
                 send_status,
-                send_json
+                send_json,
+                sample_rate=sample_rate
             )
 
     except WebSocketDisconnect:
