@@ -724,7 +724,26 @@ async def websocket_endpoint(websocket: WebSocket):
 
         while True:
             try:
-                data = await websocket.receive_bytes()
+                message = await websocket.receive()
+
+                # Handle text messages (like barge-in)
+                if "text" in message:
+                    try:
+                        msg = json.loads(message["text"])
+                        if msg.get("type") == "barge_in":
+                            print("[WS] Barge-in received, cancelling tasks...", flush=True)
+                            await arbitrator.handle_barge_in(session_state)
+                            await send_status("Interrupted - listening...")
+                            continue
+                    except json.JSONDecodeError:
+                        pass
+                    continue
+
+                # Handle binary audio data
+                if "bytes" not in message:
+                    continue
+
+                data = message["bytes"]
             except Exception as e:
                 print(f"[WS] Error receiving: {e}", flush=True)
                 break

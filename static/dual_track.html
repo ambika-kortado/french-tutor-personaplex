@@ -240,7 +240,10 @@
         let mediaStream = null;
         let processor = null;
         let continuousMode = false;  // Auto-listen after response
-        let isSpeaking = false;  // Track if browser TTS is speaking
+        let isSpeaking = false;  // Track if audio is playing
+        let currentSource = null;  // Current audio source for stopping
+        let audioQueue = [];  // Queue for sequential playback
+        let isPlayingQueue = false;
 
         function connect() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -309,9 +312,9 @@
             }
         }
 
-        // Browser TTS fallback with continuous mode support
+        // Browser TTS fallback (only used if server TTS fails)
         function speakText(text) {
-            if ('speechSynthesis' in window) {
+            if ('speechSynthesis' in window && !isSpeaking) {
                 isSpeaking = true;
                 const utterance = new SpeechSynthesisUtterance(text);
                 utterance.rate = 1.0;
@@ -338,7 +341,49 @@
             conversation.scrollTop = conversation.scrollHeight;
         }
 
+        // Stop all audio playback (for barge-in)
+        function stopAllAudio() {
+            console.log('Stopping all audio...');
+            // Stop current audio source
+            if (currentSource) {
+                try {
+                    currentSource.stop();
+                } catch (e) {}
+                currentSource = null;
+            }
+            // Clear queue
+            audioQueue = [];
+            isPlayingQueue = false;
+            isSpeaking = false;
+            // Stop browser TTS
+            if ('speechSynthesis' in window) {
+                speechSynthesis.cancel();
+            }
+        }
+
         async function playAudio(blob) {
+            // Add to queue
+            audioQueue.push(blob);
+            if (!isPlayingQueue) {
+                playNextInQueue();
+            }
+        }
+
+        async function playNextInQueue() {
+            if (audioQueue.length === 0) {
+                isPlayingQueue = false;
+                isSpeaking = false;
+                // Auto-listen after all audio finishes
+                if (continuousMode && !isRecording) {
+                    setTimeout(() => startRecording(), 300);
+                }
+                return;
+            }
+
+            isPlayingQueue = true;
+            isSpeaking = true;
+            const blob = audioQueue.shift();
+
             try {
                 if (!audioContext) {
                     audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
@@ -355,17 +400,17 @@
                 audioBuffer.getChannelData(0).set(float32Array);
 
                 const source = audioContext.createBufferSource();
+                currentSource = source;
                 source.buffer = audioBuffer;
                 source.connect(audioContext.destination);
                 source.onended = () => {
-                    // Auto-listen after audio finishes in continuous mode
-                    if (continuousMode && !isRecording) {
-                        setTimeout(() => startRecording(), 300);
-                    }
+                    currentSource = null;
+                    playNextInQueue();
                 };
                 source.start();
             } catch (e) {
                 console.error('Audio error:', e);
+                playNextInQueue();
             }
         }
 
@@ -381,6 +426,15 @@
         async function startRecording() {
             try {
                 console.log('Starting recording...');
+
+                // BARGE-IN: Stop any playing audio when user starts speaking
+                stopAllAudio();
+
+                // Notify server of barge-in to cancel pending tasks
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'barge_in' }));
+                }
+
                 mediaStream = await navigator.mediaDevices.getUserMedia({
                     audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true }
                 });
