@@ -30,3 +30,4 @@ moshi>=0.2.6
 # Utilities
 python-dotenv>=1.0.0
 pydantic>=2.5.0
+scipy>=1.11.0

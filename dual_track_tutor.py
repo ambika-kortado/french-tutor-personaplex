@@ -287,24 +287,28 @@ class TTSEngine:
         try:
             import torch
 
-            # Use Moshi TTS
+            # Use Moshi TTS - voice can be "main" or path to voice file
+            print(f"[TTS] Synthesizing: {text[:50]}...", flush=True)
             with torch.no_grad():
                 audio_tensors = await asyncio.to_thread(
                     self.model.simple_generate,
                     text=text,
-                    voices="main",
+                    voice="main",  # Use default voice
                     cfg_coef=2.0,
-                    temp=0.6,
-                    progress=False
+                    show_progress=False
                 )
 
-                if isinstance(audio_tensors, list):
+                if isinstance(audio_tensors, list) and len(audio_tensors) > 0:
                     audio = audio_tensors[0].cpu().numpy()
                 else:
                     audio = audio_tensors.cpu().numpy()
 
+                # Flatten if needed
+                audio = audio.flatten()
+
                 # Convert to 16-bit PCM
                 audio_int16 = (audio * 32767).astype(np.int16)
+                print(f"[TTS] Generated {len(audio_int16)} samples", flush=True)
                 return audio_int16.tobytes()
 
         except Exception as e:
@@ -328,6 +332,16 @@ class STTEngine:
         import io
         import soundfile as sf
 
+        print(f"[STT] Transcribing {len(audio)} samples at {sample_rate}Hz...", flush=True)
+
+        # Resample to 16kHz if needed (Whisper expects 16kHz)
+        if sample_rate != 16000:
+            import scipy.signal as signal
+            num_samples = int(len(audio) * 16000 / sample_rate)
+            audio = signal.resample(audio, num_samples)
+            sample_rate = 16000
+            print(f"[STT] Resampled to {len(audio)} samples at 16kHz", flush=True)
+
         # Convert to WAV
         buffer = io.BytesIO()
         sf.write(buffer, audio, sample_rate, format='wav')
@@ -340,9 +354,11 @@ class STTEngine:
                 model="whisper-1",
                 file=buffer
             )
-            return response.text.strip()
+            text = response.text.strip()
+            print(f"[STT] Transcribed: '{text}'", flush=True)
+            return text
         except Exception as e:
-            print(f"[STT] Error: {e}")
+            print(f"[STT] Error: {e}", flush=True)
             return ""
 
 
