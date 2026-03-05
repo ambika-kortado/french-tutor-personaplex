@@ -31,3 +31,6 @@ moshi>=0.2.6
 python-dotenv>=1.0.0
 pydantic>=2.5.0
 scipy>=1.11.0
+
+# For Moshi S2S client
+sphn>=0.1.4

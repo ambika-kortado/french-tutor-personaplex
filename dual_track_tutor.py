@@ -82,62 +82,121 @@ log_file: Optional[str] = None
 
 class PersonaPlexTrack:
     """
-    PersonaPlex Speech-to-Speech track for fast filler responses.
+    PersonaPlex/Moshi Speech-to-Speech track for fast filler responses.
 
-    TODO: Replace scaffold with actual PersonaPlex SDK calls when available.
+    Runs Moshi server as subprocess and connects via WebSocket for
+    true end-to-end speech-to-speech with contextual responses.
     """
 
     def __init__(self):
         self.is_loaded = False
-        self.model = None
+        self.moshi_process = None
+        self.moshi_ws = None
+        self.moshi_port = 8998
+        self.use_moshi_s2s = False
 
     async def load(self) -> bool:
-        """Load PersonaPlex model"""
+        """Load PersonaPlex/Moshi S2S model"""
         try:
-            # TODO: Replace with actual PersonaPlex SDK initialization
-            # from personaplex_sdk import PersonaPlex
-            # self.model = PersonaPlex.load("moshi-1.0")
+            print("[PersonaPlex] Checking for Moshi S2S...", flush=True)
 
-            print("[PersonaPlex] Loading model...")
-
-            # Scaffold: Check if Moshi is available
+            # Check if moshi and required deps are available
             try:
+                import torch
+                if not torch.cuda.is_available():
+                    print("[PersonaPlex] No GPU - Moshi S2S needs CUDA, using text fillers", flush=True)
+                    self.is_loaded = True
+                    return True
+
+                # Try to import moshi server components
                 from moshi.models import loaders
-                from moshi.models.tts import get_default_tts_model
+                print("[PersonaPlex] Moshi available, starting S2S server...", flush=True)
 
-                # TODO: Load actual S2S model, not just TTS
-                # For now, we'll use TTS as a fallback
-                print("[PersonaPlex] Moshi available, loading TTS model...")
-                # self.model = get_default_tts_model(device='cpu')
-                self.is_loaded = True
-                print("[PersonaPlex] Model loaded (TTS mode)")
-                return True
+                # Start Moshi server as subprocess
+                import subprocess
+                self.moshi_process = subprocess.Popen(
+                    ["python", "-m", "moshi.server", "--port", str(self.moshi_port)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
 
-            except ImportError:
-                print("[PersonaPlex] Moshi not available, using filler text mode")
-                self.is_loaded = True  # Use text-only fillers
-                return True
+                # Wait for server to start
+                await asyncio.sleep(5)
+
+                # Try to connect
+                import websockets
+                try:
+                    self.moshi_ws = await asyncio.wait_for(
+                        websockets.connect(f"ws://localhost:{self.moshi_port}/api/chat"),
+                        timeout=10
+                    )
+                    self.use_moshi_s2s = True
+                    self.is_loaded = True
+                    print("[PersonaPlex] Moshi S2S connected!", flush=True)
+                    return True
+                except Exception as e:
+                    print(f"[PersonaPlex] Could not connect to Moshi server: {e}", flush=True)
+                    if self.moshi_process:
+                        self.moshi_process.terminate()
+
+            except ImportError as e:
+                print(f"[PersonaPlex] Moshi not available: {e}", flush=True)
+
+            # Fallback to text fillers
+            print("[PersonaPlex] Using text filler mode", flush=True)
+            self.is_loaded = True
+            return True
 
         except Exception as e:
-            print(f"[PersonaPlex] Failed to load: {e}")
-            return False
+            print(f"[PersonaPlex] Failed to load: {e}", flush=True)
+            self.is_loaded = True  # Still use text fillers
+            return True
 
     async def generate_filler(self, user_audio: Optional[np.ndarray] = None) -> Dict[str, Any]:
         """
         Generate a fast filler/acknowledgment response.
 
-        TODO: Replace with actual PersonaPlex S2S call:
-            response = await asyncio.to_thread(
-                self.model.generate_response,
-                audio=user_audio,
-                max_duration=2.0,  # Short response
-                style="acknowledgment"
-            )
-
-        Returns:
-            Dict with 'text' and optionally 'audio' keys
+        If Moshi S2S is available, sends audio and gets contextual response.
+        Otherwise returns pre-defined text fillers.
         """
-        # Scaffold: Return pre-defined fillers
+        start_time = time.time()
+
+        # Try Moshi S2S if available
+        if self.use_moshi_s2s and self.moshi_ws and user_audio is not None:
+            try:
+                import sphn
+
+                # Encode audio to Opus
+                opus_writer = sphn.OpusStreamWriter(24000)
+                # Resample to 24kHz if needed
+                if len(user_audio) > 0:
+                    audio_24k = user_audio  # TODO: resample if not 24kHz
+                    opus_writer.append_pcm(audio_24k)
+                    opus_bytes = opus_writer.read_bytes()
+
+                    # Send to Moshi (prefix with \x01 for audio)
+                    await self.moshi_ws.send(b"\x01" + opus_bytes)
+
+                    # Get response (with short timeout for filler)
+                    response_audio = []
+                    try:
+                        async for msg in asyncio.wait_for(self._recv_moshi_audio(), timeout=0.8):
+                            response_audio.append(msg)
+                    except asyncio.TimeoutError:
+                        pass
+
+                    if response_audio:
+                        audio_bytes = b"".join(response_audio)
+                        latency = (time.time() - start_time) * 1000
+                        return {
+                            "text": "[Moshi S2S response]",
+                            "audio": audio_bytes,
+                            "latency_ms": latency
+                        }
+            except Exception as e:
+                print(f"[PersonaPlex] Moshi S2S error: {e}", flush=True)
+
+        # Fallback: Return pre-defined fillers
         fillers = [
             "That's a great question about history!",
             "Interesting point! Let me think about that.",
@@ -148,33 +207,47 @@ class PersonaPlexTrack:
 
         import random
         filler_text = random.choice(fillers)
-
-        # TODO: Generate actual audio with PersonaPlex
-        # audio = await asyncio.to_thread(
-        #     self.model.text_to_speech,
-        #     text=filler_text
-        # )
+        latency = (time.time() - start_time) * 1000
 
         return {
             "text": filler_text,
-            "audio": None,  # TODO: Return actual audio bytes
-            "latency_ms": 50  # Simulated fast response
+            "audio": None,
+            "latency_ms": latency
         }
+
+    async def _recv_moshi_audio(self):
+        """Receive audio frames from Moshi"""
+        import sphn
+        opus_reader = sphn.OpusStreamReader(24000)
+
+        while True:
+            try:
+                msg = await self.moshi_ws.recv()
+                if isinstance(msg, bytes) and len(msg) > 0:
+                    kind = msg[0]
+                    if kind == 1:  # Audio
+                        opus_reader.append_bytes(msg[1:])
+                        pcm = opus_reader.read_pcm()
+                        if len(pcm) > 0:
+                            yield (pcm * 32767).astype(np.int16).tobytes()
+            except:
+                break
+
+    async def cleanup(self):
+        """Cleanup Moshi resources"""
+        if self.moshi_ws:
+            await self.moshi_ws.close()
+        if self.moshi_process:
+            self.moshi_process.terminate()
 
     async def process_audio_stream(
         self,
         audio_chunks: List[np.ndarray]
     ) -> Dict[str, Any]:
-        """
-        Process audio stream through PersonaPlex S2S.
-
-        TODO: Implement actual streaming S2S:
-            async with self.model.stream_session() as session:
-                for chunk in audio_chunks:
-                    session.feed_audio(chunk)
-                response = await session.get_response()
-        """
-        # Scaffold: Just generate a filler
+        """Process audio stream through PersonaPlex S2S."""
+        if audio_chunks:
+            combined = np.concatenate(audio_chunks)
+            return await self.generate_filler(combined)
         return await self.generate_filler()
 
 
@@ -438,8 +511,9 @@ class Arbitrator:
         await send_status_callback(f"You said: {user_text}")
 
         # Step 2: Start both tracks in parallel
+        # Pass audio to PersonaPlex for contextual S2S response
         personaplex_task = asyncio.create_task(
-            self.personaplex.generate_filler()
+            self.personaplex.generate_filler(user_audio=audio)
         )
         llm_task = asyncio.create_task(
             self.llm.generate_response(user_text, session)
@@ -681,6 +755,9 @@ async def lifespan(app: FastAPI):
     yield
 
     print("\nShutting down...")
+    # Cleanup Moshi S2S if running
+    if personaplex_track:
+        await personaplex_track.cleanup()
 
 
 app = FastAPI(lifespan=lifespan)
