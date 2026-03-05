@@ -222,8 +222,8 @@
     </div>
 
     <div class="info">
-        <p>Click Start for continuous conversation. Click again to end your turn.</p>
-        <p>Tutor will respond, then automatically listen for your next message.</p>
+        <p>Click Start once for continuous conversation.</p>
+        <p>Auto-detects when you stop speaking and sends. Click Stop to end.</p>
     </div>
 
     <script>
@@ -371,6 +371,12 @@
 
         let audioChunks = [];
         let mediaRecorder = null;
+        let analyser = null;
+        let vadCheckInterval = null;
+        let silenceStart = null;
+        let hasSpeech = false;
+        const SILENCE_THRESHOLD = 0.01;  // Audio level threshold
+        const SILENCE_DURATION = 1200;   // 1.2 seconds of silence to auto-send
 
         async function startRecording() {
             try {
@@ -379,9 +385,18 @@
                     audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true }
                 });
 
-                // Use MediaRecorder for simpler capture
+                // Set up audio analyser for VAD
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioCtx.createMediaStreamSource(mediaStream);
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 512;
+                source.connect(analyser);
+
+                // Use MediaRecorder for capture
                 mediaRecorder = new MediaRecorder(mediaStream, { mimeType: 'audio/webm' });
                 audioChunks = [];
+                hasSpeech = false;
+                silenceStart = null;
 
                 mediaRecorder.ondataavailable = (e) => {
                     if (e.data.size > 0) {
@@ -391,20 +406,27 @@
 
                 mediaRecorder.onstop = async () => {
                     console.log('Recording stopped, processing...');
-                    if (audioChunks.length === 0) return;
+                    clearInterval(vadCheckInterval);
+
+                    if (audioChunks.length === 0 || !hasSpeech) {
+                        console.log('No speech detected, skipping');
+                        if (continuousMode) {
+                            setTimeout(() => startRecording(), 500);
+                        }
+                        return;
+                    }
 
                     const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
                     console.log('Audio blob size:', audioBlob.size);
 
-                    // Convert to PCM using AudioContext
+                    // Convert to PCM
                     const arrayBuffer = await audioBlob.arrayBuffer();
-                    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    const decodeCtx = new (window.AudioContext || window.webkitAudioContext)();
 
                     try {
-                        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+                        const audioBuffer = await decodeCtx.decodeAudioData(arrayBuffer);
                         const pcmData = audioBuffer.getChannelData(0);
 
-                        // Convert to 16-bit PCM
                         const pcm16 = new Int16Array(pcmData.length);
                         for (let i = 0; i < pcmData.length; i++) {
                             pcm16[i] = Math.max(-32768, Math.min(32767, pcmData[i] * 32768));
@@ -415,16 +437,52 @@
                     } catch (err) {
                         console.error('Audio decode error:', err);
                     }
-                    audioCtx.close();
+                    decodeCtx.close();
                 };
 
-                mediaRecorder.start(100); // Collect data every 100ms
+                mediaRecorder.start(100);
                 isRecording = true;
                 talkBtn.classList.add('active');
                 talkBtn.querySelector('span').textContent = 'Listening...';
                 statusDot.className = 'status-dot listening';
-                statusText.textContent = 'Listening... (click to send)';
-                console.log('Recording started');
+                statusText.textContent = 'Speak now... (auto-detects when you stop)';
+
+                // Start VAD monitoring
+                vadCheckInterval = setInterval(() => {
+                    if (!analyser) return;
+
+                    const dataArray = new Uint8Array(analyser.fftSize);
+                    analyser.getByteTimeDomainData(dataArray);
+
+                    // Calculate RMS
+                    let sum = 0;
+                    for (let i = 0; i < dataArray.length; i++) {
+                        const val = (dataArray[i] - 128) / 128;
+                        sum += val * val;
+                    }
+                    const rms = Math.sqrt(sum / dataArray.length);
+
+                    if (rms > SILENCE_THRESHOLD) {
+                        // Speech detected
+                        hasSpeech = true;
+                        silenceStart = null;
+                        statusText.textContent = 'Listening... (speaking)';
+                    } else if (hasSpeech) {
+                        // Silence after speech
+                        if (!silenceStart) {
+                            silenceStart = Date.now();
+                        } else if (Date.now() - silenceStart > SILENCE_DURATION) {
+                            // Auto-send after silence
+                            console.log('Silence detected, auto-sending...');
+                            stopRecording();
+                        } else {
+                            const remaining = Math.ceil((SILENCE_DURATION - (Date.now() - silenceStart)) / 1000);
+                            statusText.textContent = `Silence detected... sending in ${remaining}s`;
+                        }
+                    }
+                }, 100);
+
+                console.log('Recording started with VAD');
 
             } catch (e) {
                 console.error('Mic error:', e);
@@ -438,6 +496,8 @@
             talkBtn.classList.remove('active');
             talkBtn.querySelector('span').textContent = continuousMode ? 'Processing...' : 'Start';
             statusDot.className = 'status-dot thinking';
+
+            clearInterval(vadCheckInterval);
 
             if (mediaRecorder && mediaRecorder.state !== 'inactive') {
                 mediaRecorder.stop();
@@ -453,13 +513,15 @@
                 // Start continuous mode
                 continuousMode = true;
                 startRecording();
-            } else if (isRecording) {
-                // Stop recording (send what we have)
-                stopRecording();
             } else {
-                // Exit continuous mode
+                // Stop continuous mode completely
                 continuousMode = false;
+                if (isRecording) {
+                    stopRecording();
+                }
+                talkBtn.classList.remove('active');
                 talkBtn.querySelector('span').textContent = 'Start';
+                statusText.textContent = 'Stopped. Click Start to begin.';
             }
         });
 
