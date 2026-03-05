@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Professor James - Realtime Voice</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+            color: #fff;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem;
+        }
+
+        h1 {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+            background: linear-gradient(90deg, #f093fb 0%, #f5576c 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .subtitle {
+            color: #a0a0c0;
+            margin-bottom: 0.5rem;
+        }
+
+        .badge {
+            background: linear-gradient(90deg, #11998e, #38ef7d);
+            color: #000;
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-bottom: 2rem;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 600px;
+        }
+
+        .status-bar {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+            text-align: center;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.75rem;
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #888;
+            transition: all 0.3s;
+        }
+
+        .status-dot.connected { background: #38ef7d; box-shadow: 0 0 10px #38ef7d; }
+        .status-dot.listening { background: #f5576c; box-shadow: 0 0 10px #f5576c; animation: pulse 1s infinite; }
+        .status-dot.speaking { background: #f093fb; box-shadow: 0 0 10px #f093fb; animation: pulse 0.5s infinite; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.7; transform: scale(1.1); }
+        }
+
+        .visualizer {
+            height: 60px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 3px;
+            padding: 0 1rem;
+        }
+
+        .bar {
+            width: 4px;
+            height: 10px;
+            background: linear-gradient(180deg, #f093fb, #f5576c);
+            border-radius: 2px;
+            transition: height 0.1s ease;
+        }
+
+        .conversation {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            min-height: 250px;
+            max-height: 350px;
+            overflow-y: auto;
+        }
+
+        .message {
+            margin-bottom: 1rem;
+            padding: 0.75rem 1rem;
+            border-radius: 12px;
+            max-width: 85%;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message.user {
+            background: rgba(245, 87, 108, 0.2);
+            margin-left: auto;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.assistant {
+            background: rgba(240, 147, 251, 0.2);
+            margin-right: auto;
+            border-bottom-left-radius: 4px;
+        }
+
+        .message.assistant.streaming {
+            border-left: 2px solid #f093fb;
+        }
+
+        .message-label {
+            font-size: 0.7rem;
+            color: #a0a0c0;
+            margin-bottom: 0.25rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .controls {
+            display: flex;
+            justify-content: center;
+        }
+
+        .talk-btn {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            border: none;
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+        }
+
+        .talk-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 10px 40px rgba(240, 147, 251, 0.4);
+        }
+
+        .talk-btn.active {
+            background: linear-gradient(135deg, #38ef7d 0%, #11998e 100%);
+            animation: pulse 1s infinite;
+        }
+
+        .talk-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .talk-btn svg {
+            width: 32px;
+            height: 32px;
+        }
+
+        .info {
+            margin-top: 2rem;
+            text-align: center;
+            color: #a0a0c0;
+            font-size: 0.85rem;
+        }
+
+        .latency {
+            font-size: 0.75rem;
+            color: #38ef7d;
+            margin-top: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <h1>Professor James</h1>
+    <p class="subtitle">Your AI History Teacher</p>
+    <div class="badge">GPT-4o Realtime - Low Latency</div>
+
+    <div class="container">
+        <div class="status-bar">
+            <span class="status-dot" id="statusDot"></span>
+            <span id="statusText">Connecting...</span>
+        </div>
+
+        <div class="visualizer" id="visualizer">
+            <!-- Audio visualization bars -->
+        </div>
+
+        <div class="conversation" id="conversation"></div>
+
+        <div class="controls">
+            <button class="talk-btn" id="talkBtn" disabled>
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+                    <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+                </svg>
+                <span>Talk</span>
+            </button>
+        </div>
+    </div>
+
+    <div class="info">
+        <p>Click and hold to speak - release to let Professor James respond</p>
+        <p>Or just start talking - voice activity detection will handle turn-taking</p>
+        <div class="latency" id="latency"></div>
+    </div>
+
+    <script>
+        // DOM Elements
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const visualizer = document.getElementById('visualizer');
+        const conversation = document.getElementById('conversation');
+        const talkBtn = document.getElementById('talkBtn');
+        const latencyEl = document.getElementById('latency');
+
+        // State
+        let ws = null;
+        let audioContext = null;
+        let mediaStream = null;
+        let processor = null;
+        let isRecording = false;
+        let currentAssistantMessage = null;
+        let responseStartTime = null;
+
+        // Audio playback queue
+        let audioQueue = [];
+        let isPlaying = false;
+
+        // Create visualizer bars
+        for (let i = 0; i < 32; i++) {
+            const bar = document.createElement('div');
+            bar.className = 'bar';
+            visualizer.appendChild(bar);
+        }
+        const bars = visualizer.querySelectorAll('.bar');
+
+        // Initialize WebSocket
+        function connect() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+            ws.onopen = () => {
+                statusDot.className = 'status-dot connected';
+                statusText.textContent = 'Connected - Click to talk';
+                talkBtn.disabled = false;
+            };
+
+            ws.onclose = () => {
+                statusDot.className = 'status-dot';
+                statusText.textContent = 'Disconnected - Reconnecting...';
+                talkBtn.disabled = true;
+                setTimeout(connect, 2000);
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                handleMessage(msg);
+            };
+        }
+
+        function handleMessage(msg) {
+            switch (msg.type) {
+                case 'status':
+                    statusText.textContent = msg.message;
+                    break;
+
+                case 'speech_started':
+                    statusDot.className = 'status-dot listening';
+                    statusText.textContent = 'Listening...';
+                    break;
+
+                case 'speech_stopped':
+                    statusText.textContent = 'Processing...';
+                    responseStartTime = Date.now();
+                    break;
+
+                case 'transcript':
+                    if (msg.role === 'user') {
+                        addMessage('You', msg.text, 'user');
+                    } else {
+                        // Final assistant transcript
+                        if (currentAssistantMessage) {
+                            currentAssistantMessage.classList.remove('streaming');
+                        }
+                    }
+                    break;
+
+                case 'transcript_delta':
+                    if (msg.role === 'assistant') {
+                        if (!currentAssistantMessage) {
+                            currentAssistantMessage = addMessage('Professor James', '', 'assistant', true);
+
+                            // Show latency
+                            if (responseStartTime) {
+                                const latency = Date.now() - responseStartTime;
+                                latencyEl.textContent = `Response latency: ${latency}ms`;
+                            }
+                        }
+                        const textEl = currentAssistantMessage.querySelector('.text');
+                        textEl.textContent += msg.delta;
+                        conversation.scrollTop = conversation.scrollHeight;
+                    }
+                    break;
+
+                case 'audio':
+                    // Queue audio for playback
+                    const audioData = base64ToArrayBuffer(msg.audio);
+                    audioQueue.push(audioData);
+                    playNextAudio();
+
+                    statusDot.className = 'status-dot speaking';
+                    statusText.textContent = 'Speaking...';
+                    break;
+
+                case 'audio_done':
+                case 'response_done':
+                    currentAssistantMessage = null;
+                    if (!isRecording) {
+                        statusDot.className = 'status-dot connected';
+                        statusText.textContent = 'Ready - Click to talk';
+                    }
+                    break;
+
+                case 'error':
+                    console.error('Server error:', msg.message);
+                    statusText.textContent = 'Error: ' + msg.message;
+                    break;
+            }
+        }
+
+        function addMessage(sender, text, type, streaming = false) {
+            const div = document.createElement('div');
+            div.className = `message ${type}${streaming ? ' streaming' : ''}`;
+            div.innerHTML = `
+                <div class="message-label">${sender}</div>
+                <div class="text">${text}</div>
+            `;
+            conversation.appendChild(div);
+            conversation.scrollTop = conversation.scrollHeight;
+            return div;
+        }
+
+        // Audio playback
+        function base64ToArrayBuffer(base64) {
+            const binary = atob(base64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        async function playNextAudio() {
+            if (isPlaying || audioQueue.length === 0) return;
+
+            isPlaying = true;
+            const audioData = audioQueue.shift();
+
+            try {
+                if (!audioContext) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                        sampleRate: 24000
+                    });
+                }
+
+                // Convert PCM16 to Float32
+                const int16Array = new Int16Array(audioData);
+                const float32Array = new Float32Array(int16Array.length);
+                for (let i = 0; i < int16Array.length; i++) {
+                    float32Array[i] = int16Array[i] / 32768.0;
+                }
+
+                // Create audio buffer
+                const audioBuffer = audioContext.createBuffer(1, float32Array.length, 24000);
+                audioBuffer.getChannelData(0).set(float32Array);
+
+                // Visualize
+                visualizeAudio(float32Array);
+
+                // Play
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                source.onended = () => {
+                    isPlaying = false;
+                    playNextAudio();
+                };
+                source.start();
+
+            } catch (error) {
+                console.error('Audio playback error:', error);
+                isPlaying = false;
+                playNextAudio();
+            }
+        }
+
+        function visualizeAudio(samples) {
+            const step = Math.floor(samples.length / bars.length);
+            for (let i = 0; i < bars.length; i++) {
+                const start = i * step;
+                let sum = 0;
+                for (let j = 0; j < step; j++) {
+                    sum += Math.abs(samples[start + j] || 0);
+                }
+                const avg = sum / step;
+                const height = Math.min(50, 10 + avg * 200);
+                bars[i].style.height = `${height}px`;
+            }
+
+            // Decay
+            setTimeout(() => {
+                bars.forEach(bar => bar.style.height = '10px');
+            }, 100);
+        }
+
+        // Audio recording
+        async function startRecording() {
+            try {
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: 24000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    }
+                });
+
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: 24000
+                });
+
+                const source = audioContext.createMediaStreamSource(mediaStream);
+                processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                processor.onaudioprocess = (e) => {
+                    if (!isRecording || ws.readyState !== WebSocket.OPEN) return;
+
+                    const inputData = e.inputBuffer.getChannelData(0);
+
+                    // Visualize input
+                    visualizeAudio(inputData);
+
+                    // Convert to PCM16
+                    const pcm16 = new Int16Array(inputData.length);
+                    for (let i = 0; i < inputData.length; i++) {
+                        pcm16[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+                    }
+
+                    // Send as base64
+                    const base64 = btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)));
+                    ws.send(JSON.stringify({
+                        type: 'audio',
+                        audio: base64
+                    }));
+                };
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                isRecording = true;
+                talkBtn.classList.add('active');
+                talkBtn.querySelector('span').textContent = 'Listening...';
+                statusDot.className = 'status-dot listening';
+                statusText.textContent = 'Listening...';
+
+            } catch (error) {
+                console.error('Microphone error:', error);
+                statusText.textContent = 'Microphone access denied';
+            }
+        }
+
+        function stopRecording() {
+            isRecording = false;
+            talkBtn.classList.remove('active');
+            talkBtn.querySelector('span').textContent = 'Talk';
+
+            if (processor) {
+                processor.disconnect();
+                processor = null;
+            }
+
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+
+            // Commit the audio buffer to trigger response
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'commit' }));
+            }
+
+            statusText.textContent = 'Processing...';
+        }
+
+        // Event listeners
+        talkBtn.addEventListener('mousedown', startRecording);
+        talkBtn.addEventListener('mouseup', stopRecording);
+        talkBtn.addEventListener('mouseleave', () => {
+            if (isRecording) stopRecording();
+        });
+
+        // Touch support
+        talkBtn.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            startRecording();
+        });
+        talkBtn.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            stopRecording();
+        });
+
+        // Initialize
+        connect();
+
+        // Welcome message
+        addMessage('Professor James',
+            "Hello! I'm Professor James, your history teacher. " +
+            "Hold the button and ask me about any period of history - " +
+            "from ancient civilizations to modern events. What would you like to explore?",
+            'assistant');
+    </script>
+</body>
+</html>

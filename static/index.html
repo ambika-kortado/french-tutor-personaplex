@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>History Tutor - Voice Conversation</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #fff;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem;
+        }
+
+        h1 {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+            background: linear-gradient(90deg, #4facfe 0%, #00f2fe 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .subtitle {
+            color: #8892b0;
+            margin-bottom: 2rem;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 600px;
+        }
+
+        .status-bar {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+            text-align: center;
+        }
+
+        .status-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #888;
+            transition: background 0.3s;
+        }
+
+        .status-dot.connected {
+            background: #00ff88;
+            box-shadow: 0 0 10px #00ff88;
+        }
+
+        .status-dot.recording {
+            background: #ff4444;
+            box-shadow: 0 0 10px #ff4444;
+            animation: pulse 1s infinite;
+        }
+
+        .status-dot.processing {
+            background: #ffaa00;
+            box-shadow: 0 0 10px #ffaa00;
+            animation: pulse 0.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .conversation {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            min-height: 300px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .message {
+            margin-bottom: 1rem;
+            padding: 0.75rem 1rem;
+            border-radius: 12px;
+            max-width: 85%;
+        }
+
+        .message.user {
+            background: rgba(79, 172, 254, 0.2);
+            margin-left: auto;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.assistant {
+            background: rgba(0, 242, 254, 0.2);
+            margin-right: auto;
+            border-bottom-left-radius: 4px;
+        }
+
+        .message-label {
+            font-size: 0.75rem;
+            color: #8892b0;
+            margin-bottom: 0.25rem;
+        }
+
+        .controls {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+        }
+
+        button {
+            padding: 1rem 2rem;
+            font-size: 1rem;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: 600;
+        }
+
+        .record-btn {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: #1a1a2e;
+            min-width: 200px;
+        }
+
+        .record-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 10px 30px rgba(79, 172, 254, 0.3);
+        }
+
+        .record-btn.recording {
+            background: linear-gradient(135deg, #ff4444 0%, #ff6b6b 100%);
+        }
+
+        .record-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .reset-btn {
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+        }
+
+        .reset-btn:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .info {
+            margin-top: 2rem;
+            text-align: center;
+            color: #8892b0;
+            font-size: 0.9rem;
+        }
+
+        .info p {
+            margin-bottom: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <h1>Professor James</h1>
+    <p class="subtitle">Your AI History Teacher</p>
+
+    <div class="container">
+        <div class="status-bar">
+            <div class="status-indicator">
+                <span class="status-dot" id="statusDot"></span>
+                <span id="statusText">Connecting...</span>
+            </div>
+        </div>
+
+        <div class="conversation" id="conversation">
+            <!-- Messages will appear here -->
+        </div>
+
+        <div class="controls">
+            <button class="record-btn" id="recordBtn" disabled>
+                Start Speaking
+            </button>
+            <button class="reset-btn" id="resetBtn">
+                New Conversation
+            </button>
+        </div>
+    </div>
+
+    <div class="info">
+        <p>Press and hold the button to speak, or click to start/stop recording</p>
+        <p>Ask about any historical topic and Professor James will teach you!</p>
+    </div>
+
+    <script>
+        // DOM Elements
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const conversation = document.getElementById('conversation');
+        const recordBtn = document.getElementById('recordBtn');
+        const resetBtn = document.getElementById('resetBtn');
+
+        // State
+        let ws = null;
+        let mediaRecorder = null;
+        let audioContext = null;
+        let isRecording = false;
+        let currentSampleRate = 24000;
+
+        // Initialize WebSocket connection
+        function connect() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+            ws.onopen = () => {
+                statusDot.className = 'status-dot connected';
+                statusText.textContent = 'Connected - Ready to speak';
+                recordBtn.disabled = false;
+            };
+
+            ws.onclose = () => {
+                statusDot.className = 'status-dot';
+                statusText.textContent = 'Disconnected - Reconnecting...';
+                recordBtn.disabled = true;
+                setTimeout(connect, 2000);
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                statusText.textContent = 'Connection error';
+            };
+
+            ws.onmessage = async (event) => {
+                if (event.data instanceof Blob) {
+                    // Binary audio data
+                    await playAudio(event.data);
+                } else {
+                    // JSON message
+                    const msg = JSON.parse(event.data);
+                    handleMessage(msg);
+                }
+            };
+        }
+
+        function handleMessage(msg) {
+            switch (msg.type) {
+                case 'status':
+                    statusText.textContent = msg.message;
+                    if (msg.message.includes('Transcribing') ||
+                        msg.message.includes('Thinking') ||
+                        msg.message.includes('Generating')) {
+                        statusDot.className = 'status-dot processing';
+                    } else {
+                        statusDot.className = 'status-dot connected';
+                    }
+                    break;
+
+                case 'transcript':
+                    addMessage('You', msg.text, 'user');
+                    break;
+
+                case 'response':
+                    addMessage('Professor James', msg.text, 'assistant');
+                    break;
+
+                case 'audio_info':
+                    currentSampleRate = msg.sample_rate;
+                    break;
+
+                case 'error':
+                    console.error('Server error:', msg.message);
+                    statusText.textContent = 'Error: ' + msg.message;
+                    break;
+            }
+        }
+
+        function addMessage(sender, text, type) {
+            const div = document.createElement('div');
+            div.className = `message ${type}`;
+            div.innerHTML = `
+                <div class="message-label">${sender}</div>
+                <div>${text}</div>
+            `;
+            conversation.appendChild(div);
+            conversation.scrollTop = conversation.scrollHeight;
+        }
+
+        async function playAudio(blob) {
+            try {
+                // Initialize AudioContext if needed
+                if (!audioContext) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                }
+
+                // Convert blob to ArrayBuffer
+                const arrayBuffer = await blob.arrayBuffer();
+
+                // Create Int16Array from the raw PCM data
+                const int16Array = new Int16Array(arrayBuffer);
+
+                // Convert to Float32Array
+                const float32Array = new Float32Array(int16Array.length);
+                for (let i = 0; i < int16Array.length; i++) {
+                    float32Array[i] = int16Array[i] / 32768.0;
+                }
+
+                // Create AudioBuffer
+                const audioBuffer = audioContext.createBuffer(
+                    1, // mono
+                    float32Array.length,
+                    currentSampleRate
+                );
+                audioBuffer.getChannelData(0).set(float32Array);
+
+                // Play the audio
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                source.start();
+
+            } catch (error) {
+                console.error('Audio playback error:', error);
+            }
+        }
+
+        async function startRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    }
+                });
+
+                // Create audio processor for raw PCM
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: 16000
+                });
+                const source = audioCtx.createMediaStreamSource(stream);
+                const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+                processor.onaudioprocess = (e) => {
+                    if (!isRecording) return;
+
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    // Convert to 16-bit PCM
+                    const pcmData = new Int16Array(inputData.length);
+                    for (let i = 0; i < inputData.length; i++) {
+                        pcmData[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+                    }
+
+                    // Send to server
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(pcmData.buffer);
+                    }
+                };
+
+                source.connect(processor);
+                processor.connect(audioCtx.destination);
+
+                isRecording = true;
+                recordBtn.textContent = 'Stop Speaking';
+                recordBtn.classList.add('recording');
+                statusDot.className = 'status-dot recording';
+                statusText.textContent = 'Listening...';
+
+                // Store references for cleanup
+                recordBtn.audioCtx = audioCtx;
+                recordBtn.stream = stream;
+                recordBtn.processor = processor;
+
+            } catch (error) {
+                console.error('Microphone error:', error);
+                statusText.textContent = 'Microphone access denied';
+            }
+        }
+
+        function stopRecording() {
+            isRecording = false;
+            recordBtn.textContent = 'Start Speaking';
+            recordBtn.classList.remove('recording');
+            statusDot.className = 'status-dot connected';
+
+            // Cleanup
+            if (recordBtn.stream) {
+                recordBtn.stream.getTracks().forEach(track => track.stop());
+            }
+            if (recordBtn.processor) {
+                recordBtn.processor.disconnect();
+            }
+            if (recordBtn.audioCtx) {
+                recordBtn.audioCtx.close();
+            }
+        }
+
+        // Event listeners
+        recordBtn.addEventListener('click', () => {
+            if (isRecording) {
+                stopRecording();
+            } else {
+                startRecording();
+            }
+        });
+
+        resetBtn.addEventListener('click', async () => {
+            try {
+                await fetch('/reset', { method: 'POST' });
+                conversation.innerHTML = '';
+                addMessage('Professor James',
+                    "Hello! I'm Professor James, your history teacher. " +
+                    "What period of history would you like to explore today?",
+                    'assistant');
+            } catch (error) {
+                console.error('Reset error:', error);
+            }
+        });
+
+        // Initialize
+        connect();
+
+        // Add welcome message
+        addMessage('Professor James',
+            "Hello! I'm Professor James, your history teacher. " +
+            "What period of history would you like to explore today?",
+            'assistant');
+    </script>
+</body>
+</html>
