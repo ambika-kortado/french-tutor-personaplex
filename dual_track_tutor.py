@@ -100,38 +100,54 @@ class PersonaPlexTrack:
         try:
             print("[PersonaPlex] Checking for Moshi S2S...", flush=True)
 
-            # Check if moshi and required deps are available
+            import websockets
+
+            # First, check if Moshi server is already running
+            print("[PersonaPlex] Checking for existing Moshi server...", flush=True)
+            try:
+                self.moshi_ws = await asyncio.wait_for(
+                    websockets.connect(f"ws://localhost:{self.moshi_port}/api/chat"),
+                    timeout=3
+                )
+                self.use_moshi_s2s = True
+                self.is_loaded = True
+                print("[PersonaPlex] Connected to existing Moshi server!", flush=True)
+                return True
+            except:
+                print("[PersonaPlex] No existing server found", flush=True)
+
+            # Check for GPU
             try:
                 import torch
                 if not torch.cuda.is_available():
-                    print("[PersonaPlex] No GPU - Moshi S2S needs CUDA, using text fillers", flush=True)
+                    print("[PersonaPlex] No GPU - using text fillers", flush=True)
+                    print("[PersonaPlex] To enable Moshi S2S, run: python -m moshi.server --port 8998", flush=True)
                     self.is_loaded = True
                     return True
+            except:
+                pass
 
-                # Try to import moshi server components
+            # Try to start server as subprocess (optional - can skip if slow)
+            try:
                 from moshi.models import loaders
-                print("[PersonaPlex] Moshi available, starting S2S server...", flush=True)
-
-                # Start Moshi server as subprocess
                 import subprocess
-                print("[PersonaPlex] Starting Moshi server subprocess...", flush=True)
+
+                print("[PersonaPlex] Starting Moshi server (this takes 30-60s)...", flush=True)
+                print("[PersonaPlex] Or run separately: python -m moshi.server --port 8998", flush=True)
+
                 self.moshi_process = subprocess.Popen(
                     ["python", "-m", "moshi.server", "--port", str(self.moshi_port)],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT
                 )
 
-                # Wait for server to start with retries
-                import websockets
-                max_retries = 10
-                for attempt in range(max_retries):
-                    await asyncio.sleep(3)  # Wait 3 seconds between attempts
-                    print(f"[PersonaPlex] Connection attempt {attempt + 1}/{max_retries}...", flush=True)
+                # Wait for server with retries
+                for attempt in range(15):  # 45 seconds total
+                    await asyncio.sleep(3)
 
-                    # Check if process is still running
                     if self.moshi_process.poll() is not None:
                         stdout = self.moshi_process.stdout.read().decode() if self.moshi_process.stdout else ""
-                        print(f"[PersonaPlex] Moshi server exited: {stdout[:500]}", flush=True)
+                        print(f"[PersonaPlex] Server exited: {stdout[:300]}", flush=True)
                         break
 
                     try:
@@ -143,25 +159,22 @@ class PersonaPlexTrack:
                         self.is_loaded = True
                         print("[PersonaPlex] Moshi S2S connected!", flush=True)
                         return True
-                    except Exception as e:
-                        if attempt == max_retries - 1:
-                            print(f"[PersonaPlex] Could not connect to Moshi server: {e}", flush=True)
+                    except:
+                        print(f"[PersonaPlex] Waiting for server... ({(attempt+1)*3}s)", flush=True)
 
-                # Cleanup on failure
                 if self.moshi_process and self.moshi_process.poll() is None:
                     self.moshi_process.terminate()
 
-            except ImportError as e:
-                print(f"[PersonaPlex] Moshi not available: {e}", flush=True)
+            except ImportError:
+                pass
 
-            # Fallback to text fillers
             print("[PersonaPlex] Using text filler mode", flush=True)
             self.is_loaded = True
             return True
 
         except Exception as e:
-            print(f"[PersonaPlex] Failed to load: {e}", flush=True)
-            self.is_loaded = True  # Still use text fillers
+            print(f"[PersonaPlex] Error: {e}", flush=True)
+            self.is_loaded = True
             return True
 
     async def generate_filler(self, user_audio: Optional[np.ndarray] = None) -> Dict[str, Any]:
