@@ -476,11 +476,12 @@ class Arbitrator:
 
         except asyncio.TimeoutError:
             # LLM is slow - use PersonaPlex filler first
+            print(f"[Arbitrator] LLM timeout after {LLM_TIMEOUT}s, using filler", flush=True)
 
             # Check for barge-in
             if session.barge_in_detected:
                 personaplex_task.cancel()
-                claude_task.cancel()
+                llm_task.cancel()
                 result["barge_in"] = True
                 return result
 
@@ -500,11 +501,15 @@ class Arbitrator:
 
             except asyncio.CancelledError:
                 pass
+            except Exception as e:
+                print(f"[Arbitrator] Filler error: {e}", flush=True)
 
             # Now wait for LLM
+            print(f"[Arbitrator] Waiting for LLM response...", flush=True)
             try:
                 llm_result = await llm_task
-                result["claude_response"] = llm_result  # Keep key for logging compatibility
+                print(f"[Arbitrator] LLM responded: {llm_result.get('text', '')[:50]}...", flush=True)
+                result["claude_response"] = llm_result
                 result["claude_used"] = True
                 result["spoken_response"] = llm_result["text"]
 
@@ -515,17 +520,22 @@ class Arbitrator:
 
                 # Speak LLM's response
                 await send_status_callback("Speaking response...")
+                print(f"[Arbitrator] Synthesizing LLM response...", flush=True)
                 audio_data = await self.tts.synthesize(llm_result["text"])
                 if audio_data:
+                    print(f"[Arbitrator] Sending LLM audio: {len(audio_data)} bytes", flush=True)
                     await send_audio_callback(audio_data)
                 elif send_json_callback:
+                    print(f"[Arbitrator] Sending LLM text for browser TTS", flush=True)
                     await send_json_callback({"type": "response", "text": llm_result["text"]})
 
                 # Update conversation history
                 session.add_assistant_message(llm_result["text"])
 
             except asyncio.CancelledError:
-                pass
+                print(f"[Arbitrator] LLM task was cancelled", flush=True)
+            except Exception as e:
+                print(f"[Arbitrator] LLM error: {e}", flush=True)
 
         # Log the exchange
         await self.log_exchange(result)
