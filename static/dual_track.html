@@ -359,6 +359,59 @@
             if ('speechSynthesis' in window) {
                 speechSynthesis.cancel();
             }
+            // Stop barge-in monitoring
+            if (bargeInCheckInterval) {
+                clearInterval(bargeInCheckInterval);
+                bargeInCheckInterval = null;
+            }
+        }
+
+        // Start monitoring mic for barge-in while audio plays
+        async function startBargeInMonitoring() {
+            if (bargeInCheckInterval) return; // Already monitoring
+
+            try {
+                // Get persistent mic access if not already
+                if (!persistentStream) {
+                    persistentStream = await navigator.mediaDevices.getUserMedia({
+                        audio: { echoCancellation: true, noiseSuppression: true }
+                    });
+                    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                    const source = ctx.createMediaStreamSource(persistentStream);
+                    persistentAnalyser = ctx.createAnalyser();
+                    persistentAnalyser.fftSize = 512;
+                    source.connect(persistentAnalyser);
+                }
+
+                // Monitor for speech during playback
+                bargeInCheckInterval = setInterval(() => {
+                    if (!persistentAnalyser || !isSpeaking) {
+                        clearInterval(bargeInCheckInterval);
+                        bargeInCheckInterval = null;
+                        return;
+                    }
+
+                    const dataArray = new Uint8Array(persistentAnalyser.fftSize);
+                    persistentAnalyser.getByteTimeDomainData(dataArray);
+
+                    let sum = 0;
+                    for (let i = 0; i < dataArray.length; i++) {
+                        const val = (dataArray[i] - 128) / 128;
+                        sum += val * val;
+                    }
+                    const rms = Math.sqrt(sum / dataArray.length);
+
+                    if (rms > BARGE_IN_THRESHOLD) {
+                        console.log('BARGE-IN detected! RMS:', rms.toFixed(3));
+                        // Stop audio and start recording
+                        stopAllAudio();
+                        startRecording();
+                    }
+                }, 50); // Check every 50ms for faster response
+
+            } catch (e) {
+                console.error('Barge-in monitoring error:', e);
+            }
         }
 
         async function playAudio(blob) {
@@ -383,6 +436,11 @@
             isPlayingQueue = true;
             isSpeaking = true;
             const blob = audioQueue.shift();
+
+            // Start barge-in monitoring while audio plays
+            if (continuousMode) {
+                startBargeInMonitoring();
+            }
 
             try {
                 if (!audioContext) {
@@ -420,8 +478,12 @@
         let vadCheckInterval = null;
         let silenceStart = null;
         let hasSpeech = false;
-        const SILENCE_THRESHOLD = 0.01;  // Audio level threshold
+        let persistentStream = null;  // Keep mic always open for barge-in
+        let persistentAnalyser = null;
+        let bargeInCheckInterval = null;
+        const SILENCE_THRESHOLD = 0.015;  // Audio level threshold
         const SILENCE_DURATION = 1200;   // 1.2 seconds of silence to auto-send
+        const BARGE_IN_THRESHOLD = 0.03; // Higher threshold for barge-in detection
 
         async function startRecording() {
             try {
