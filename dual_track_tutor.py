@@ -114,30 +114,42 @@ class PersonaPlexTrack:
 
                 # Start Moshi server as subprocess
                 import subprocess
+                print("[PersonaPlex] Starting Moshi server subprocess...", flush=True)
                 self.moshi_process = subprocess.Popen(
                     ["python", "-m", "moshi.server", "--port", str(self.moshi_port)],
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
+                    stderr=subprocess.STDOUT
                 )
 
-                # Wait for server to start
-                await asyncio.sleep(5)
-
-                # Try to connect
+                # Wait for server to start with retries
                 import websockets
-                try:
-                    self.moshi_ws = await asyncio.wait_for(
-                        websockets.connect(f"ws://localhost:{self.moshi_port}/api/chat"),
-                        timeout=10
-                    )
-                    self.use_moshi_s2s = True
-                    self.is_loaded = True
-                    print("[PersonaPlex] Moshi S2S connected!", flush=True)
-                    return True
-                except Exception as e:
-                    print(f"[PersonaPlex] Could not connect to Moshi server: {e}", flush=True)
-                    if self.moshi_process:
-                        self.moshi_process.terminate()
+                max_retries = 10
+                for attempt in range(max_retries):
+                    await asyncio.sleep(3)  # Wait 3 seconds between attempts
+                    print(f"[PersonaPlex] Connection attempt {attempt + 1}/{max_retries}...", flush=True)
+
+                    # Check if process is still running
+                    if self.moshi_process.poll() is not None:
+                        stdout = self.moshi_process.stdout.read().decode() if self.moshi_process.stdout else ""
+                        print(f"[PersonaPlex] Moshi server exited: {stdout[:500]}", flush=True)
+                        break
+
+                    try:
+                        self.moshi_ws = await asyncio.wait_for(
+                            websockets.connect(f"ws://localhost:{self.moshi_port}/api/chat"),
+                            timeout=5
+                        )
+                        self.use_moshi_s2s = True
+                        self.is_loaded = True
+                        print("[PersonaPlex] Moshi S2S connected!", flush=True)
+                        return True
+                    except Exception as e:
+                        if attempt == max_retries - 1:
+                            print(f"[PersonaPlex] Could not connect to Moshi server: {e}", flush=True)
+
+                # Cleanup on failure
+                if self.moshi_process and self.moshi_process.poll() is None:
+                    self.moshi_process.terminate()
 
             except ImportError as e:
                 print(f"[PersonaPlex] Moshi not available: {e}", flush=True)
