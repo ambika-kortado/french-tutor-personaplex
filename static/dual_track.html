@@ -481,9 +481,9 @@
         let persistentStream = null;  // Keep mic always open for barge-in
         let persistentAnalyser = null;
         let bargeInCheckInterval = null;
-        const SILENCE_THRESHOLD = 0.015;  // Audio level threshold
-        const SILENCE_DURATION = 1200;   // 1.2 seconds of silence to auto-send
-        const BARGE_IN_THRESHOLD = 0.03; // Higher threshold for barge-in detection
+        const SILENCE_THRESHOLD = 0.02;   // Audio level threshold for speech detection
+        const SILENCE_DURATION = 1000;   // 1 second of silence to auto-send
+        const BARGE_IN_THRESHOLD = 0.08; // Much higher threshold for barge-in (avoid false triggers)
 
         async function startRecording() {
             try {

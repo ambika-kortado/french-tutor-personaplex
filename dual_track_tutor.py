@@ -39,8 +39,8 @@ except ImportError:
 from openai import OpenAI
 
 # Configuration
-LLM_MODEL = "gpt-4o"
-LLM_TIMEOUT = 1.2  # seconds before falling back to filler
+LLM_MODEL = "gpt-4o-mini"  # Faster than gpt-4o, still smart
+LLM_TIMEOUT = 0.8  # seconds before falling back to filler
 SAMPLE_RATE = 24000
 
 # Session state
@@ -190,14 +190,18 @@ class PersonaPlexTrack:
         if self.use_moshi_s2s and self.moshi_ws and user_audio is not None:
             try:
                 import sphn
+                import scipy.signal as signal
 
-                # Encode audio to Opus
-                opus_writer = sphn.OpusStreamWriter(24000)
-                # Resample to 24kHz if needed
+                # Resample to 24kHz for Moshi
                 if len(user_audio) > 0:
-                    audio_24k = user_audio  # TODO: resample if not 24kHz
+                    # Assume input is 44.1kHz, resample to 24kHz
+                    num_samples_24k = int(len(user_audio) * 24000 / 44100)
+                    audio_24k = signal.resample(user_audio, num_samples_24k).astype(np.float32)
+
+                    # Encode audio to Opus using sphn
+                    opus_writer = sphn.OpusStreamWriter(24000)
                     opus_writer.append_pcm(audio_24k)
-                    opus_bytes = opus_writer.read_bytes()
+                    opus_bytes = bytes(opus_writer)  # Convert to bytes
 
                     # Send to Moshi (prefix with \x01 for audio)
                     await self.moshi_ws.send(b"\x01" + opus_bytes)
@@ -205,7 +209,7 @@ class PersonaPlexTrack:
                     # Get response (with short timeout for filler)
                     response_audio = []
                     try:
-                        async for msg in asyncio.wait_for(self._recv_moshi_audio(), timeout=0.8):
+                        async for msg in asyncio.wait_for(self._recv_moshi_audio(), timeout=0.6):
                             response_audio.append(msg)
                     except asyncio.TimeoutError:
                         pass
@@ -213,6 +217,7 @@ class PersonaPlexTrack:
                     if response_audio:
                         audio_bytes = b"".join(response_audio)
                         latency = (time.time() - start_time) * 1000
+                        print(f"[PersonaPlex] Moshi S2S responded in {latency:.0f}ms", flush=True)
                         return {
                             "text": "[Moshi S2S response]",
                             "audio": audio_bytes,
