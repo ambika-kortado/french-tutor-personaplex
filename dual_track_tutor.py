@@ -304,23 +304,23 @@ class PersonaPlexTrack:
         sample_rate: int = 44100
     ) -> Dict[str, Any]:
         """
-        Use PersonaPlex offline mode to process audio with text prompt conditioning.
-        This injects GPT knowledge directly as text - no TTS needed!
-
-        Calls: python -m moshi.offline --text-prompt "..." --input-wav ... --output-wav ...
+        Use PersonaPlex inference server for fast text prompt conditioning.
+        The server keeps the model loaded, so only prompt injection happens per-request.
 
         Args:
             user_audio: User's audio as float32 numpy array
             text_prompt: GPT knowledge to condition the response
-            voice_prompt: Voice to use (NATF2, NATM0, etc.)
+            voice_prompt: Voice to use (NATF2.pt, NATM0.pt, etc.)
             sample_rate: Sample rate of input audio
         """
+        import aiohttp
         import tempfile
         import soundfile as sf
         import scipy.signal as signal
-        import subprocess
+        import base64
 
         start_time = time.time()
+        server_url = "http://localhost:8999/generate"
 
         try:
             # Resample to 24kHz for PersonaPlex
@@ -330,72 +330,60 @@ class PersonaPlexTrack:
             else:
                 audio_24k = user_audio.astype(np.float32)
 
-            # Create temp files for input/output
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f_in:
-                sf.write(f_in.name, audio_24k, 24000)
-                input_path = f_in.name
+            # Save to temp WAV and encode as base64
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                sf.write(f.name, audio_24k, 24000)
+                with open(f.name, "rb") as audio_file:
+                    audio_base64 = base64.b64encode(audio_file.read()).decode()
+                os.unlink(f.name)
 
-            output_path = input_path.replace(".wav", "_out.wav")
-            output_text_path = input_path.replace(".wav", "_out.json")
+            # Call PersonaPlex inference server
+            print(f"[PersonaPlex] Calling inference server with text_prompt...", flush=True)
 
-            # Call PersonaPlex offline mode with text_prompt
-            cmd = [
-                "python", "-m", "moshi.offline",
-                "--voice-prompt", voice_prompt,
-                "--text-prompt", text_prompt,
-                "--input-wav", input_path,
-                "--output-wav", output_path,
-                "--output-text", output_text_path
-            ]
-
-            print(f"[PersonaPlex] Running offline mode with text_prompt...", flush=True)
-
-            # Run async subprocess
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-
-            if proc.returncode == 0 and os.path.exists(output_path):
-                # Read the output audio
-                audio_data, sr = sf.read(output_path)
-                # Convert to 16-bit PCM bytes
-                audio_int16 = (audio_data * 32767).astype(np.int16)
-                audio_bytes = audio_int16.tobytes()
-
-                latency = (time.time() - start_time) * 1000
-                print(f"[PersonaPlex] Offline mode responded in {latency:.0f}ms with text_prompt", flush=True)
-
-                # Clean up temp files
-                os.unlink(input_path)
-                os.unlink(output_path)
-                if os.path.exists(output_text_path):
-                    os.unlink(output_text_path)
-
-                return {
-                    "text": text_prompt,
-                    "audio": audio_bytes,
-                    "latency_ms": latency,
-                    "method": "offline_text_prompt"
+            async with aiohttp.ClientSession() as session:
+                payload = {
+                    "audio_base64": audio_base64,
+                    "text_prompt": text_prompt,
+                    "voice_prompt": voice_prompt
                 }
-            else:
-                print(f"[PersonaPlex] Offline mode failed: {stderr.decode()[:200]}", flush=True)
+                async with session.post(
+                    server_url,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        # Decode output audio
+                        output_bytes = base64.b64decode(result["audio_base64"])
 
-            # Clean up
-            if os.path.exists(input_path):
-                os.unlink(input_path)
-            if os.path.exists(output_path):
-                os.unlink(output_path)
-            if os.path.exists(output_text_path):
-                os.unlink(output_text_path)
+                        # Convert WAV to raw PCM
+                        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                            f.write(output_bytes)
+                            audio_data, sr = sf.read(f.name)
+                            os.unlink(f.name)
 
-        except asyncio.TimeoutError:
-            print(f"[PersonaPlex] Offline mode timed out after 30s", flush=True)
+                        audio_int16 = (audio_data * 32767).astype(np.int16)
+                        audio_bytes = audio_int16.tobytes()
+
+                        latency = (time.time() - start_time) * 1000
+                        print(f"[PersonaPlex] Server responded in {latency:.0f}ms with text_prompt", flush=True)
+
+                        return {
+                            "text": text_prompt,
+                            "audio": audio_bytes,
+                            "transcript": result.get("transcript", ""),
+                            "latency_ms": latency,
+                            "method": "server_text_prompt"
+                        }
+                    else:
+                        error = await resp.text()
+                        print(f"[PersonaPlex] Server error {resp.status}: {error[:100]}", flush=True)
+
+        except aiohttp.ClientError as e:
+            print(f"[PersonaPlex] Server not available: {e}", flush=True)
+            print(f"[PersonaPlex] Start it with: python personaplex_server.py --port 8999", flush=True)
         except Exception as e:
-            print(f"[PersonaPlex] Offline mode with text_prompt failed: {e}", flush=True)
+            print(f"[PersonaPlex] Server request failed: {e}", flush=True)
 
         # Fallback to WebSocket method (no text_prompt)
         return await self.generate_filler(user_audio)
@@ -932,7 +920,7 @@ Respond naturally and conversationally in 1-2 sentences."""
             sample_rate=sample_rate
         )
 
-        if moshi_result.get("audio") and moshi_result.get("method") == "offline_text_prompt":
+        if moshi_result.get("audio") and moshi_result.get("method") == "server_text_prompt":
             # Success! PersonaPlex responded with text conditioning
             audio_bytes = moshi_result["audio"]
             print(f"[Moshi-First] PersonaPlex response with text_prompt: {len(audio_bytes)} bytes", flush=True)
