@@ -41,6 +41,7 @@ from openai import OpenAI
 # Configuration
 LLM_MODEL = "gpt-4o-mini"  # Faster than gpt-4o, still smart
 LLM_TIMEOUT = 0.8  # seconds before falling back to filler
+MOSHI_FIRST_MODE = True  # Moshi handles conversation, GPT whispers knowledge
 SAMPLE_RATE = 24000
 
 # Session state
@@ -262,6 +263,87 @@ class PersonaPlexTrack:
                             yield (pcm * 32767).astype(np.int16).tobytes()
             except:
                 break
+
+    async def inject_knowledge(self, knowledge_text: str) -> bool:
+        """
+        Inject GPT's knowledge into Moshi as text context.
+        Moshi will naturally incorporate this into its response.
+        """
+        if not self.use_moshi_s2s or not self.moshi_ws:
+            return False
+
+        try:
+            # Send text to Moshi (type 2 = text tokens)
+            # Format: \x02 + UTF-8 text
+            text_bytes = knowledge_text.encode('utf-8')
+            await self.moshi_ws.send(b"\x02" + text_bytes)
+            print(f"[PersonaPlex] Injected knowledge: {knowledge_text[:50]}...", flush=True)
+            return True
+        except Exception as e:
+            print(f"[PersonaPlex] Failed to inject knowledge: {e}", flush=True)
+            return False
+
+    async def converse_with_knowledge(
+        self,
+        user_audio: np.ndarray,
+        knowledge_text: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Full conversation through Moshi S2S, with optional GPT knowledge injection.
+        This is the "Moshi-first" mode where Moshi handles conversation naturally.
+        """
+        start_time = time.time()
+
+        if not self.use_moshi_s2s or not self.moshi_ws:
+            # Fallback if Moshi not available
+            return await self.generate_filler(user_audio)
+
+        try:
+            import sphn
+            import scipy.signal as signal
+
+            # Resample to 24kHz for Moshi
+            if len(user_audio) > 0:
+                num_samples_24k = int(len(user_audio) * 24000 / 44100)
+                audio_24k = signal.resample(user_audio, num_samples_24k).astype(np.float32)
+
+                # If we have knowledge to inject, send it first
+                if knowledge_text:
+                    await self.inject_knowledge(knowledge_text)
+
+                # Encode and send user audio
+                opus_writer = sphn.OpusStreamWriter(24000)
+                opus_writer.append_pcm(audio_24k)
+                opus_bytes = bytes(opus_writer)
+
+                await self.moshi_ws.send(b"\x01" + opus_bytes)
+
+                # Collect response audio
+                response_audio = []
+                try:
+                    async for audio_chunk in self._recv_moshi_audio():
+                        response_audio.append(audio_chunk)
+                        # Stream chunks as they arrive (for low latency)
+                        if len(response_audio) > 5:  # Start yielding early
+                            break
+                except asyncio.TimeoutError:
+                    pass
+
+                if response_audio:
+                    audio_bytes = b"".join(response_audio)
+                    latency = (time.time() - start_time) * 1000
+                    print(f"[PersonaPlex] Moshi responded in {latency:.0f}ms", flush=True)
+                    return {
+                        "text": "[Moshi S2S with knowledge]" if knowledge_text else "[Moshi S2S]",
+                        "audio": audio_bytes,
+                        "latency_ms": latency,
+                        "used_knowledge": knowledge_text is not None
+                    }
+
+        except Exception as e:
+            print(f"[PersonaPlex] Conversation error: {e}", flush=True)
+
+        return await self.generate_filler(user_audio)
 
     async def cleanup(self):
         """Cleanup Moshi resources"""
@@ -527,6 +609,14 @@ class Arbitrator:
         # Reset barge-in flag
         session.barge_in_detected = False
 
+        # MOSHI-FIRST MODE: Moshi handles conversation, GPT whispers knowledge
+        if MOSHI_FIRST_MODE and self.personaplex.use_moshi_s2s:
+            return await self._process_moshi_first(
+                audio, session, send_audio_callback, send_status_callback,
+                send_json_callback, sample_rate, result
+            )
+
+        # Legacy mode: STT → LLM → TTS with filler
         # Step 1: Transcribe user audio (STT)
         await send_status_callback("Transcribing...")
         user_text = await self.stt.transcribe(audio, sample_rate=sample_rate)
@@ -648,6 +738,80 @@ class Arbitrator:
         session.current_tasks = []
         await send_status_callback("Ready - speak when you want!")
 
+        return result
+
+    async def _process_moshi_first(
+        self,
+        audio: np.ndarray,
+        session: SessionState,
+        send_audio_callback,
+        send_status_callback,
+        send_json_callback,
+        sample_rate: int,
+        result: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        MOSHI-FIRST MODE: Moshi handles conversation, GPT whispers knowledge.
+
+        Flow:
+        1. Send audio to Moshi S2S (starts responding immediately)
+        2. In parallel, STT + GPT-4o for knowledge
+        3. Inject GPT knowledge into Moshi as text
+        4. Moshi naturally incorporates and speaks it
+        """
+        await send_status_callback("Moshi listening...")
+
+        # Start GPT knowledge fetch in parallel with STT
+        async def get_knowledge():
+            user_text = await self.stt.transcribe(audio, sample_rate=sample_rate)
+            if user_text.strip():
+                session.add_user_message(user_text)
+                llm_result = await self.llm.generate_response(user_text, session)
+                return user_text, llm_result.get("text", "")
+            return "", ""
+
+        knowledge_task = asyncio.create_task(get_knowledge())
+
+        # Send audio to Moshi immediately (don't wait for STT)
+        await send_status_callback("Moshi responding...")
+        moshi_result = await self.personaplex.converse_with_knowledge(
+            user_audio=audio,
+            knowledge_text=None  # First response without knowledge
+        )
+
+        # Send Moshi's immediate response
+        if moshi_result.get("audio"):
+            print(f"[Moshi-First] Sending immediate response", flush=True)
+            await send_audio_callback(moshi_result["audio"])
+            result["personaplex_response"] = moshi_result
+            result["personaplex_used"] = True
+
+        # Now check if GPT has knowledge ready
+        try:
+            user_text, knowledge = await asyncio.wait_for(knowledge_task, timeout=2.0)
+            result["user_text"] = user_text
+
+            if knowledge:
+                print(f"[Moshi-First] GPT knowledge: {knowledge[:50]}...", flush=True)
+                result["claude_response"] = {"text": knowledge}
+                result["claude_used"] = True
+
+                # Inject knowledge and get Moshi to speak it naturally
+                await send_status_callback("Moshi speaking knowledge...")
+                knowledge_response = await self.personaplex.converse_with_knowledge(
+                    user_audio=np.zeros(1000, dtype=np.float32),  # Minimal audio
+                    knowledge_text=f"Please tell the student: {knowledge}"
+                )
+
+                if knowledge_response.get("audio"):
+                    await send_audio_callback(knowledge_response["audio"])
+                    result["spoken_response"] = knowledge
+                    session.add_assistant_message(knowledge)
+
+        except asyncio.TimeoutError:
+            print(f"[Moshi-First] GPT knowledge timeout", flush=True)
+
+        await send_status_callback("Ready - speak when you want!")
         return result
 
     async def handle_barge_in(self, session: SessionState):
