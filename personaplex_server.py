@@ -217,12 +217,29 @@ def _generate_sync(
     """Synchronous generation (runs in thread pool)"""
     global lm_gen, mimi, other_mimi, text_tokenizer, device
 
-    # Reset all streaming states
-    mimi.reset_streaming()
-    other_mimi.reset_streaming()
-    lm_gen.reset_streaming()
+    # Find voice prompt path
+    import glob
+    cache_pattern = os.path.expanduser(
+        "~/.cache/huggingface/hub/models--nvidia--personaplex-7b-v1/snapshots/*/voices"
+    )
+    voice_dirs = glob.glob(cache_pattern)
+    voice_path = None
+    for voice_dir in voice_dirs:
+        candidate = os.path.join(voice_dir, voice_prompt)
+        if os.path.exists(candidate):
+            voice_path = candidate
+            break
 
-    # Set text prompt (the fast part!)
+    if not voice_path:
+        raise FileNotFoundError(f"Voice prompt {voice_prompt} not found")
+
+    # 1) Load voice prompt (for .pt files use load_voice_prompt_embeddings)
+    if voice_prompt.endswith('.pt'):
+        lm_gen.load_voice_prompt_embeddings(voice_path)
+    else:
+        lm_gen.load_voice_prompt(voice_path)
+
+    # 2) Set text prompt
     if text_prompt:
         lm_gen.text_prompt_tokens = text_tokenizer.encode(
             wrap_with_system_tags(text_prompt)
@@ -230,56 +247,55 @@ def _generate_sync(
     else:
         lm_gen.text_prompt_tokens = None
 
-    # Load voice prompt
-    voice_data = load_voice_prompt(voice_prompt)
-    lm_gen.voice_prompt_tokens = voice_data.get("codes")
-    lm_gen.voice_prompt_embeddings = voice_data.get("embeddings")
+    # 3) Reset all streaming states
+    mimi.reset_streaming()
+    other_mimi.reset_streaming()
+    lm_gen.reset_streaming()
 
-    # Resample input to 24kHz if needed
+    # 4) Run prompt phases (voice + text injection)
+    lm_gen.step_system_prompts(mimi)
+
+    # 5) Reset mimi after voice prompt encoding
+    mimi.reset_streaming()
+
+    # 6) Resample input to 24kHz if needed
     if sample_rate != 24000:
         from scipy import signal
         num_samples = int(len(input_audio) * 24000 / sample_rate)
         input_audio = signal.resample(input_audio, num_samples).astype(np.float32)
 
-    # Encode input audio
-    with torch.no_grad():
-        input_tensor = torch.from_numpy(input_audio).unsqueeze(0).unsqueeze(0).to(device)
-        input_codes = mimi.encode(input_tensor)
-
-    # Step through system prompts (voice + text)
-    lm_gen.step_system_prompts(mimi)
-
-    # Generate response
-    output_codes = []
+    # 7) Encode and process user audio frame by frame
+    frame_size = int(mimi.sample_rate / mimi.frame_rate)
+    output_frames = []
     output_text_tokens = []
 
-    # Feed input and generate
-    for i in range(input_codes.shape[-1]):
-        frame = input_codes[:, :, i:i+1]
-        out = lm_gen.step(frame)
-        if out is not None:
-            audio_tokens, text_token = out
-            output_codes.append(audio_tokens)
-            if text_token is not None:
-                output_text_tokens.append(text_token)
+    with torch.no_grad():
+        # Pad input to multiple of frame_size
+        pad_len = (frame_size - len(input_audio) % frame_size) % frame_size
+        if pad_len > 0:
+            input_audio = np.pad(input_audio, (0, pad_len))
 
-    # Continue generating until done or max length
-    max_gen_frames = 500  # ~10 seconds
-    for _ in range(max_gen_frames):
-        out = lm_gen.step(None)  # No more input
-        if out is None:
-            break
-        audio_tokens, text_token = out
-        output_codes.append(audio_tokens)
-        if text_token is not None:
-            output_text_tokens.append(text_token)
+        # Process frame by frame
+        for i in range(0, len(input_audio), frame_size):
+            chunk = input_audio[i:i+frame_size]
+            chunk_tensor = torch.from_numpy(chunk).unsqueeze(0).unsqueeze(0).to(device)
+            codes = mimi.encode(chunk_tensor)
 
-    # Decode audio
-    if output_codes:
-        output_tensor = torch.cat(output_codes, dim=-1)
-        with torch.no_grad():
-            output_audio = other_mimi.decode(output_tensor)
-        output_audio = output_audio.squeeze().cpu().numpy()
+            # Step with user input
+            tokens = lm_gen.step(codes)
+            if tokens is not None:
+                # Decode agent audio
+                pcm = other_mimi.decode(tokens[:, :8, :])  # First 8 codebooks are audio
+                output_frames.append(pcm.squeeze().cpu().numpy())
+
+                # Get text token if present
+                text_token = tokens[:, 8, :].item() if tokens.shape[1] > 8 else None
+                if text_token is not None and text_token > 0:
+                    output_text_tokens.append(text_token)
+
+    # Concatenate output frames
+    if output_frames:
+        output_audio = np.concatenate(output_frames)
     else:
         output_audio = np.zeros(24000, dtype=np.float32)
 
