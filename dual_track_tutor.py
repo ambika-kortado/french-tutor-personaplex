@@ -300,7 +300,7 @@ class PersonaPlexTrack:
         self,
         user_audio: np.ndarray,
         text_prompt: str,
-        voice_prompt: str = "NATF2",
+        voice_prompt: str = "NATF2.pt",
         sample_rate: int = 44100
     ) -> Dict[str, Any]:
         """
@@ -928,7 +928,7 @@ Respond naturally and conversationally in 1-2 sentences."""
         moshi_result = await self.personaplex.converse_with_text_prompt(
             user_audio=audio,
             text_prompt=text_prompt,
-            voice_prompt="NATF2",
+            voice_prompt="NATF2.pt",
             sample_rate=sample_rate
         )
 
