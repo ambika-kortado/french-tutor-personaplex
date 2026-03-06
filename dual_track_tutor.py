@@ -336,6 +336,7 @@ class PersonaPlexTrack:
                 input_path = f_in.name
 
             output_path = input_path.replace(".wav", "_out.wav")
+            output_text_path = input_path.replace(".wav", "_out.json")
 
             # Call PersonaPlex offline mode with text_prompt
             cmd = [
@@ -343,7 +344,8 @@ class PersonaPlexTrack:
                 "--voice-prompt", voice_prompt,
                 "--text-prompt", text_prompt,
                 "--input-wav", input_path,
-                "--output-wav", output_path
+                "--output-wav", output_path,
+                "--output-text", output_text_path
             ]
 
             print(f"[PersonaPlex] Running offline mode with text_prompt...", flush=True)
@@ -370,6 +372,8 @@ class PersonaPlexTrack:
                 # Clean up temp files
                 os.unlink(input_path)
                 os.unlink(output_path)
+                if os.path.exists(output_text_path):
+                    os.unlink(output_text_path)
 
                 return {
                     "text": text_prompt,
@@ -385,6 +389,8 @@ class PersonaPlexTrack:
                 os.unlink(input_path)
             if os.path.exists(output_path):
                 os.unlink(output_path)
+            if os.path.exists(output_text_path):
+                os.unlink(output_text_path)
 
         except asyncio.TimeoutError:
             print(f"[PersonaPlex] Offline mode timed out after 30s", flush=True)
