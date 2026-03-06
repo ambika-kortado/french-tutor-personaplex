@@ -200,12 +200,13 @@ class PersonaPlexTrack:
                     audio_24k = signal.resample(user_audio, num_samples_24k).astype(np.float32)
 
                     # Encode audio to Opus using sphn
+                    # append_pcm() returns the opus bytes directly
                     opus_writer = sphn.OpusStreamWriter(24000)
-                    opus_writer.append_pcm(audio_24k)
-                    opus_bytes = bytes(opus_writer)  # Convert to bytes
+                    opus_bytes = opus_writer.append_pcm(audio_24k)
 
-                    # Send to Moshi (prefix with \x01 for audio)
-                    await self.moshi_ws.send(b"\x01" + opus_bytes)
+                    if opus_bytes:
+                        # Send to Moshi (prefix with \x01 for audio)
+                        await self.moshi_ws.send(b"\x01" + opus_bytes)
 
                     # Get response (with short timeout for filler)
                     response_audio = []
@@ -313,10 +314,10 @@ class PersonaPlexTrack:
 
                 # Encode and send user audio
                 opus_writer = sphn.OpusStreamWriter(24000)
-                opus_writer.append_pcm(audio_24k)
-                opus_bytes = bytes(opus_writer)
+                opus_bytes = opus_writer.append_pcm(audio_24k)
 
-                await self.moshi_ws.send(b"\x01" + opus_bytes)
+                if opus_bytes:
+                    await self.moshi_ws.send(b"\x01" + opus_bytes)
 
                 # Collect response audio
                 response_audio = []
