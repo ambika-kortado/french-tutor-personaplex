@@ -41,7 +41,7 @@ from openai import OpenAI
 # Configuration
 LLM_MODEL = "gpt-4o-mini"  # Faster than gpt-4o, still smart
 LLM_TIMEOUT = 0.8  # seconds before falling back to filler
-MOSHI_FIRST_MODE = True  # Moshi handles conversation, GPT whispers knowledge
+MOSHI_FIRST_MODE = True  # Moshi handles conversation, GPT knowledge sent as audio prefix
 SAMPLE_RATE = 24000
 
 # Session state
@@ -212,14 +212,12 @@ class PersonaPlexTrack:
                         if opus_bytes:
                             await self.moshi_ws.send(b"\x01" + opus_bytes)
 
-                    # Get response (with short timeout for filler)
+                    # Get response (collect audio until silence)
                     response_audio = []
-                    deadline = time.time() + 0.6
+                    deadline = time.time() + 3.0  # Up to 3 seconds
                     async for msg in self._recv_moshi_audio():
                         response_audio.append(msg)
                         if time.time() > deadline:
-                            break
-                        if len(response_audio) >= 3:  # Got enough audio
                             break
 
                     if response_audio:
@@ -770,76 +768,90 @@ class Arbitrator:
         result: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        MOSHI-FIRST MODE: Moshi handles conversation, GPT whispers knowledge.
+        MOSHI-FIRST MODE: Send [GPT knowledge audio] + [user audio] to Moshi.
 
         Flow:
-        1. Send audio to Moshi S2S (starts responding immediately)
-        2. In parallel, STT + GPT-4o for knowledge
-        3. Inject GPT knowledge into Moshi as text
-        4. Moshi naturally incorporates and speaks it
+        1. STT user audio → get transcript
+        2. GPT generates knowledge from transcript
+        3. TTS knowledge → audio "briefing"
+        4. Send [briefing audio] + [user audio] to Moshi S2S
+        5. Moshi "hears" the knowledge and responds naturally
         """
-        await send_status_callback("Moshi listening...")
+        import scipy.signal as signal
 
-        # Start GPT knowledge fetch in parallel with STT
-        async def get_knowledge():
-            user_text = await self.stt.transcribe(audio, sample_rate=sample_rate)
-            if user_text.strip():
-                session.add_user_message(user_text)
-                llm_result = await self.llm.generate_response(user_text, session)
-                return user_text, llm_result.get("text", "")
-            return "", ""
+        await send_status_callback("Processing your question...")
 
-        knowledge_task = asyncio.create_task(get_knowledge())
+        # Step 1: Transcribe user audio
+        user_text = await self.stt.transcribe(audio, sample_rate=sample_rate)
+        result["user_text"] = user_text
 
-        # Send audio to Moshi immediately (don't wait for STT)
-        await send_status_callback("Moshi responding...")
-        moshi_result = await self.personaplex.converse_with_knowledge(
-            user_audio=audio,
-            knowledge_text=None  # First response without knowledge
-        )
+        if not user_text.strip():
+            await send_status_callback("Couldn't hear you. Please try again.")
+            return result
 
-        # Send Moshi's immediate response
-        if moshi_result.get("audio"):
-            audio_bytes = moshi_result["audio"]
-            print(f"[Moshi-First] Sending immediate response: {len(audio_bytes)} bytes", flush=True)
-            await send_audio_callback(audio_bytes)
-            result["personaplex_response"] = moshi_result
-            result["personaplex_used"] = True
+        session.add_user_message(user_text)
+        print(f"[Moshi-First] User said: {user_text}", flush=True)
+
+        # Step 2: Get GPT knowledge
+        await send_status_callback("Thinking...")
+        llm_result = await self.llm.generate_response(user_text, session)
+        knowledge = llm_result.get("text", "")
+
+        if not knowledge:
+            await send_status_callback("No response available")
+            return result
+
+        print(f"[Moshi-First] GPT knowledge: {knowledge[:80]}...", flush=True)
+        result["claude_response"] = llm_result
+        result["claude_used"] = True
+
+        # Step 3: Convert knowledge to audio using Moshi TTS
+        await send_status_callback("Preparing response...")
+        # Create a prompt that Moshi should "hear" and then respond to
+        briefing_text = f"Tell the student this: {knowledge}"
+        briefing_audio_bytes = await self.tts.synthesize(briefing_text)
+
+        if briefing_audio_bytes:
+            # Convert TTS audio (16-bit PCM at 24kHz) to float32
+            briefing_np = np.frombuffer(briefing_audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            print(f"[Moshi-First] Briefing audio: {len(briefing_np)} samples ({len(briefing_np)/24000:.1f}s)", flush=True)
+
+            # Resample user audio from sample_rate to 24kHz
+            user_24k_len = int(len(audio) * 24000 / sample_rate)
+            user_24k = signal.resample(audio, user_24k_len).astype(np.float32)
+
+            # Combine: [briefing] + [pause] + [user question cue]
+            pause = np.zeros(int(24000 * 0.3), dtype=np.float32)  # 0.3s pause
+            # Just use a short cue from user audio (last 1 second) to trigger response
+            user_cue = user_24k[-24000:] if len(user_24k) > 24000 else user_24k
+            combined = np.concatenate([briefing_np, pause, user_cue])
+            print(f"[Moshi-First] Combined audio: {len(combined)} samples ({len(combined)/24000:.1f}s)", flush=True)
+
+            # Step 4: Send to Moshi S2S
+            await send_status_callback("Responding...")
+            moshi_result = await self.personaplex.generate_filler(user_audio=combined)
+
+            if moshi_result.get("audio"):
+                audio_bytes = moshi_result["audio"]
+                print(f"[Moshi-First] Moshi response: {len(audio_bytes)} bytes", flush=True)
+                await send_audio_callback(audio_bytes)
+                result["personaplex_response"] = moshi_result
+                result["personaplex_used"] = True
+                result["spoken_response"] = knowledge
+                session.add_assistant_message(knowledge)
+            else:
+                # Fallback: send the TTS audio directly
+                print(f"[Moshi-First] No Moshi response, sending TTS directly", flush=True)
+                await send_audio_callback(briefing_audio_bytes)
+                result["spoken_response"] = knowledge
+                session.add_assistant_message(knowledge)
         else:
-            print(f"[Moshi-First] No audio from Moshi initial response", flush=True)
-
-        # Now check if GPT has knowledge ready
-        try:
-            user_text, knowledge = await asyncio.wait_for(knowledge_task, timeout=5.0)
-            result["user_text"] = user_text
-            print(f"[Moshi-First] Transcribed: {user_text}", flush=True)
-
-            if knowledge:
-                print(f"[Moshi-First] GPT knowledge: {knowledge[:100]}...", flush=True)
-                result["claude_response"] = {"text": knowledge}
-                result["claude_used"] = True
-
-                # Inject knowledge and get Moshi to speak it naturally
-                await send_status_callback("Moshi speaking knowledge...")
-                knowledge_response = await self.personaplex.converse_with_knowledge(
-                    user_audio=np.zeros(1000, dtype=np.float32),  # Minimal audio
-                    knowledge_text=f"Please tell the student: {knowledge}"
-                )
-
-                if knowledge_response.get("audio"):
-                    audio_bytes = knowledge_response["audio"]
-                    print(f"[Moshi-First] Sending knowledge response: {len(audio_bytes)} bytes", flush=True)
-                    await send_audio_callback(audio_bytes)
-                    result["spoken_response"] = knowledge
-                    session.add_assistant_message(knowledge)
-                else:
-                    print(f"[Moshi-First] No audio from knowledge response, using TTS fallback", flush=True)
-                    # Fallback to TTS
-                    if send_json_callback:
-                        await send_json_callback({"type": "response", "text": knowledge})
-
-        except asyncio.TimeoutError:
-            print(f"[Moshi-First] GPT knowledge timeout", flush=True)
+            # TTS failed, use browser fallback
+            print(f"[Moshi-First] TTS failed, using browser fallback", flush=True)
+            if send_json_callback:
+                await send_json_callback({"type": "response", "text": knowledge})
+            result["spoken_response"] = knowledge
+            session.add_assistant_message(knowledge)
 
         await send_status_callback("Ready - speak when you want!")
         return result
