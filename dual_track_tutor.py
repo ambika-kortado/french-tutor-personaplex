@@ -260,15 +260,23 @@ class PersonaPlexTrack:
 
         while True:
             try:
-                msg = await self.moshi_ws.recv()
+                # Use wait_for to prevent blocking forever
+                msg = await asyncio.wait_for(self.moshi_ws.recv(), timeout=0.5)
                 if isinstance(msg, bytes) and len(msg) > 0:
                     kind = msg[0]
                     if kind == 1:  # Audio
-                        opus_reader.append_bytes(msg[1:])
-                        pcm = opus_reader.read_pcm()
-                        if len(pcm) > 0:
+                        pcm = opus_reader.append_bytes(msg[1:])
+                        if pcm is not None and len(pcm) > 0:
+                            print(f"[PersonaPlex] Got audio chunk: {len(pcm)} samples", flush=True)
                             yield (pcm * 32767).astype(np.int16).tobytes()
-            except:
+                    elif kind == 2:  # Text token
+                        text = msg[1:].decode('utf-8', errors='ignore')
+                        print(f"[PersonaPlex] Moshi says: {text}", flush=True)
+            except asyncio.TimeoutError:
+                print(f"[PersonaPlex] No more audio from Moshi", flush=True)
+                break
+            except Exception as e:
+                print(f"[PersonaPlex] Recv error: {e}", flush=True)
                 break
 
     async def inject_knowledge(self, knowledge_text: str) -> bool:
@@ -799,11 +807,12 @@ class Arbitrator:
 
         # Now check if GPT has knowledge ready
         try:
-            user_text, knowledge = await asyncio.wait_for(knowledge_task, timeout=2.0)
+            user_text, knowledge = await asyncio.wait_for(knowledge_task, timeout=5.0)
             result["user_text"] = user_text
+            print(f"[Moshi-First] Transcribed: {user_text}", flush=True)
 
             if knowledge:
-                print(f"[Moshi-First] GPT knowledge: {knowledge[:50]}...", flush=True)
+                print(f"[Moshi-First] GPT knowledge: {knowledge[:100]}...", flush=True)
                 result["claude_response"] = {"text": knowledge}
                 result["claude_used"] = True
 
