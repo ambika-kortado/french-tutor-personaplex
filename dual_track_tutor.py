@@ -724,8 +724,9 @@ class Arbitrator:
         # Reset barge-in flag
         session.barge_in_detected = False
 
-        # MOSHI-FIRST MODE: Moshi handles conversation, GPT whispers knowledge
-        if MOSHI_FIRST_MODE and self.personaplex.use_moshi_s2s:
+        # MOSHI-FIRST MODE: PersonaPlex handles conversation, GPT provides knowledge as text_prompt
+        # Uses moshi.offline which doesn't require the S2S server to be running
+        if MOSHI_FIRST_MODE:
             return await self._process_moshi_first(
                 audio, session, send_audio_callback, send_status_callback,
                 send_json_callback, sample_rate, result
