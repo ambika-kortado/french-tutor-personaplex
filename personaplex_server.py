@@ -70,21 +70,30 @@ def wrap_with_system_tags(text: str) -> str:
 
 def load_voice_prompt(voice_name: str):
     """Load a voice prompt from the model cache"""
-    global voice_prompts
+    global voice_prompts, device
 
     if voice_name in voice_prompts:
         return voice_prompts[voice_name]
 
-    # Find voice prompt file
-    from huggingface_hub import hf_hub_download
-
-    voice_path = hf_hub_download(
-        repo_id="nvidia/personaplex-7b-v1",
-        filename=f"voices/{voice_name}",
-        token=os.environ.get("HF_TOKEN")
+    # Find voice prompt in HF cache (extracted from voices.tgz)
+    import glob
+    cache_pattern = os.path.expanduser(
+        "~/.cache/huggingface/hub/models--nvidia--personaplex-7b-v1/snapshots/*/voices"
     )
+    voice_dirs = glob.glob(cache_pattern)
 
-    voice_data = torch.load(voice_path, map_location=device)
+    voice_path = None
+    for voice_dir in voice_dirs:
+        candidate = os.path.join(voice_dir, voice_name)
+        if os.path.exists(candidate):
+            voice_path = candidate
+            break
+
+    if not voice_path:
+        raise FileNotFoundError(f"Voice prompt {voice_name} not found in cache")
+
+    print(f"[PersonaPlex] Loading voice prompt: {voice_path}")
+    voice_data = torch.load(voice_path, map_location=device, weights_only=True)
     voice_prompts[voice_name] = voice_data
     return voice_data
 
@@ -115,7 +124,7 @@ def load_model():
         )
         moshi_weight = hf_hub_download(
             repo_id="nvidia/personaplex-7b-v1",
-            filename="personaplex-e0eb9f6d-checkpoint1000.safetensors",
+            filename="model.safetensors",
             token=hf_token
         )
         tokenizer_path = hf_hub_download(
