@@ -304,8 +304,10 @@ class PersonaPlexTrack:
         sample_rate: int = 44100
     ) -> Dict[str, Any]:
         """
-        Use PersonaPlex HTTP API to process audio with text prompt conditioning.
+        Use PersonaPlex offline mode to process audio with text prompt conditioning.
         This injects GPT knowledge directly as text - no TTS needed!
+
+        Calls: python -m moshi.offline --text-prompt "..." --input-wav ... --output-wav ...
 
         Args:
             user_audio: User's audio as float32 numpy array
@@ -313,10 +315,10 @@ class PersonaPlexTrack:
             voice_prompt: Voice to use (NATF2, NATM0, etc.)
             sample_rate: Sample rate of input audio
         """
-        import aiohttp
         import tempfile
         import soundfile as sf
         import scipy.signal as signal
+        import subprocess
 
         start_time = time.time()
 
@@ -328,55 +330,68 @@ class PersonaPlexTrack:
             else:
                 audio_24k = user_audio.astype(np.float32)
 
-            # Save to temp WAV file
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                sf.write(f.name, audio_24k, 24000)
-                temp_path = f.name
+            # Create temp files for input/output
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f_in:
+                sf.write(f_in.name, audio_24k, 24000)
+                input_path = f_in.name
 
-            # Call PersonaPlex HTTP API
-            api_url = f"http://localhost:{self.moshi_port}/api/process"
+            output_path = input_path.replace(".wav", "_out.wav")
 
-            async with aiohttp.ClientSession() as session:
-                with open(temp_path, 'rb') as audio_file:
-                    form_data = aiohttp.FormData()
-                    form_data.add_field('audio', audio_file, filename='input.wav')
-                    form_data.add_field('voice_prompt', voice_prompt)
-                    form_data.add_field('text_prompt', text_prompt)
+            # Call PersonaPlex offline mode with text_prompt
+            cmd = [
+                "python", "-m", "moshi.offline",
+                "--voice-prompt", voice_prompt,
+                "--text-prompt", text_prompt,
+                "--input-wav", input_path,
+                "--output-wav", output_path
+            ]
 
-                    async with session.post(api_url, data=form_data, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                        if resp.status == 200:
-                            result_data = await resp.json()
-                            audio_url = result_data.get('audio_url')
+            print(f"[PersonaPlex] Running offline mode with text_prompt...", flush=True)
 
-                            if audio_url:
-                                # Fetch the audio
-                                audio_full_url = f"http://localhost:{self.moshi_port}{audio_url}"
-                                async with session.get(audio_full_url) as audio_resp:
-                                    if audio_resp.status == 200:
-                                        audio_bytes = await audio_resp.read()
-                                        latency = (time.time() - start_time) * 1000
-                                        print(f"[PersonaPlex] HTTP API responded in {latency:.0f}ms with text_prompt", flush=True)
+            # Run async subprocess
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
 
-                                        # Clean up temp file
-                                        os.unlink(temp_path)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
 
-                                        return {
-                                            "text": text_prompt,
-                                            "audio": audio_bytes,
-                                            "latency_ms": latency,
-                                            "method": "http_text_prompt"
-                                        }
-                        else:
-                            error_text = await resp.text()
-                            print(f"[PersonaPlex] HTTP API error {resp.status}: {error_text[:100]}", flush=True)
+            if proc.returncode == 0 and os.path.exists(output_path):
+                # Read the output audio
+                audio_data, sr = sf.read(output_path)
+                # Convert to 16-bit PCM bytes
+                audio_int16 = (audio_data * 32767).astype(np.int16)
+                audio_bytes = audio_int16.tobytes()
 
-            # Clean up temp file
-            os.unlink(temp_path)
+                latency = (time.time() - start_time) * 1000
+                print(f"[PersonaPlex] Offline mode responded in {latency:.0f}ms with text_prompt", flush=True)
 
+                # Clean up temp files
+                os.unlink(input_path)
+                os.unlink(output_path)
+
+                return {
+                    "text": text_prompt,
+                    "audio": audio_bytes,
+                    "latency_ms": latency,
+                    "method": "offline_text_prompt"
+                }
+            else:
+                print(f"[PersonaPlex] Offline mode failed: {stderr.decode()[:200]}", flush=True)
+
+            # Clean up
+            if os.path.exists(input_path):
+                os.unlink(input_path)
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+
+        except asyncio.TimeoutError:
+            print(f"[PersonaPlex] Offline mode timed out after 30s", flush=True)
         except Exception as e:
-            print(f"[PersonaPlex] HTTP API with text_prompt failed: {e}", flush=True)
+            print(f"[PersonaPlex] Offline mode with text_prompt failed: {e}", flush=True)
 
-        # Fallback to WebSocket method
+        # Fallback to WebSocket method (no text_prompt)
         return await self.generate_filler(user_audio)
 
     async def converse_with_knowledge(
@@ -910,7 +925,7 @@ Respond naturally and conversationally in 1-2 sentences."""
             sample_rate=sample_rate
         )
 
-        if moshi_result.get("audio") and moshi_result.get("method") == "http_text_prompt":
+        if moshi_result.get("audio") and moshi_result.get("method") == "offline_text_prompt":
             # Success! PersonaPlex responded with text conditioning
             audio_bytes = moshi_result["audio"]
             print(f"[Moshi-First] PersonaPlex response with text_prompt: {len(audio_bytes)} bytes", flush=True)
