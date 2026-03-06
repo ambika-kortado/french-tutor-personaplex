@@ -159,6 +159,20 @@ def load_model():
             top_k_text=25,
         )
 
+        # Enter streaming mode (required before reset_streaming)
+        print("[PersonaPlex] Entering streaming mode...")
+        mimi.streaming_forever(1)
+        other_mimi.streaming_forever(1)
+        lm_gen.streaming_forever(1)
+
+        # Warmup
+        print("[PersonaPlex] Warming up...")
+        frame_size = int(mimi.sample_rate / mimi.frame_rate)
+        for _ in range(4):
+            chunk = torch.zeros(1, 1, frame_size, dtype=torch.float32, device=device)
+            codes = mimi.encode(chunk)
+            _ = lm_gen.step(codes)
+
         moshi_available = True
         print("[PersonaPlex] Model loaded successfully!")
         return True
@@ -203,7 +217,9 @@ def _generate_sync(
     """Synchronous generation (runs in thread pool)"""
     global lm_gen, mimi, other_mimi, text_tokenizer, device
 
-    # Reset the generator state
+    # Reset all streaming states
+    mimi.reset_streaming()
+    other_mimi.reset_streaming()
     lm_gen.reset_streaming()
 
     # Set text prompt (the fast part!)
