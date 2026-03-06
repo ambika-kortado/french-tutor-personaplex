@@ -807,9 +807,8 @@ class Arbitrator:
 
         # Step 3: Convert knowledge to audio using Moshi TTS
         await send_status_callback("Preparing response...")
-        # Create a prompt that Moshi should "hear" and then respond to
-        briefing_text = f"Tell the student this: {knowledge}"
-        briefing_audio_bytes = await self.tts.synthesize(briefing_text)
+        # Just synthesize the knowledge directly
+        briefing_audio_bytes = await self.tts.synthesize(knowledge)
 
         if briefing_audio_bytes:
             # Convert TTS audio (16-bit PCM at 24kHz) to float32
