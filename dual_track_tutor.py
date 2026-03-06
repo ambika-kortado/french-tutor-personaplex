@@ -193,20 +193,24 @@ class PersonaPlexTrack:
                 import sphn
                 import scipy.signal as signal
 
+                FRAME_SIZE = 1920  # 80ms at 24kHz
+
                 # Resample to 24kHz for Moshi
                 if len(user_audio) > 0:
                     # Assume input is 44.1kHz, resample to 24kHz
                     num_samples_24k = int(len(user_audio) * 24000 / 44100)
                     audio_24k = signal.resample(user_audio, num_samples_24k).astype(np.float32)
 
-                    # Encode audio to Opus using sphn
-                    # append_pcm() returns the opus bytes directly
+                    # Send audio in chunks (frame_size = 1920 samples)
                     opus_writer = sphn.OpusStreamWriter(24000)
-                    opus_bytes = opus_writer.append_pcm(audio_24k)
-
-                    if opus_bytes:
-                        # Send to Moshi (prefix with \x01 for audio)
-                        await self.moshi_ws.send(b"\x01" + opus_bytes)
+                    for i in range(0, len(audio_24k), FRAME_SIZE):
+                        chunk = audio_24k[i:i + FRAME_SIZE]
+                        if len(chunk) < FRAME_SIZE:
+                            # Pad last chunk
+                            chunk = np.pad(chunk, (0, FRAME_SIZE - len(chunk)))
+                        opus_bytes = opus_writer.append_pcm(chunk)
+                        if opus_bytes:
+                            await self.moshi_ws.send(b"\x01" + opus_bytes)
 
                     # Get response (with short timeout for filler)
                     response_audio = []
@@ -303,6 +307,8 @@ class PersonaPlexTrack:
             import sphn
             import scipy.signal as signal
 
+            FRAME_SIZE = 1920  # 80ms at 24kHz
+
             # Resample to 24kHz for Moshi
             if len(user_audio) > 0:
                 num_samples_24k = int(len(user_audio) * 24000 / 44100)
@@ -312,12 +318,15 @@ class PersonaPlexTrack:
                 if knowledge_text:
                     await self.inject_knowledge(knowledge_text)
 
-                # Encode and send user audio
+                # Send audio in chunks (frame_size = 1920 samples)
                 opus_writer = sphn.OpusStreamWriter(24000)
-                opus_bytes = opus_writer.append_pcm(audio_24k)
-
-                if opus_bytes:
-                    await self.moshi_ws.send(b"\x01" + opus_bytes)
+                for i in range(0, len(audio_24k), FRAME_SIZE):
+                    chunk = audio_24k[i:i + FRAME_SIZE]
+                    if len(chunk) < FRAME_SIZE:
+                        chunk = np.pad(chunk, (0, FRAME_SIZE - len(chunk)))
+                    opus_bytes = opus_writer.append_pcm(chunk)
+                    if opus_bytes:
+                        await self.moshi_ws.send(b"\x01" + opus_bytes)
 
                 # Collect response audio
                 response_audio = []
