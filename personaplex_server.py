@@ -95,7 +95,7 @@ def load_model():
 
     try:
         from moshi.models import loaders
-        from moshi.models.lm_gen import LMGen
+        from moshi.models.lm import LMGen
         import sentencepiece
         from huggingface_hub import hf_hub_download
 
