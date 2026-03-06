@@ -418,7 +418,7 @@ class LLMTrack:
             response = await asyncio.to_thread(
                 self.client.chat.completions.create,
                 model=LLM_MODEL,
-                max_tokens=200,  # Keep responses concise
+                max_tokens=80,  # Very short for voice - ~10 seconds of speech
                 temperature=0.8,
                 messages=messages
             )
@@ -813,37 +813,34 @@ class Arbitrator:
         if briefing_audio_bytes:
             # Convert TTS audio (16-bit PCM at 24kHz) to float32
             briefing_np = np.frombuffer(briefing_audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-            print(f"[Moshi-First] Briefing audio: {len(briefing_np)} samples ({len(briefing_np)/24000:.1f}s)", flush=True)
+            duration_s = len(briefing_np) / 24000
+            print(f"[Moshi-First] Knowledge audio: {len(briefing_np)} samples ({duration_s:.1f}s)", flush=True)
 
-            # Resample user audio from sample_rate to 24kHz
-            user_24k_len = int(len(audio) * 24000 / sample_rate)
-            user_24k = signal.resample(audio, user_24k_len).astype(np.float32)
-
-            # Combine: [briefing] + [pause] + [user question cue]
-            pause = np.zeros(int(24000 * 0.3), dtype=np.float32)  # 0.3s pause
-            # Just use a short cue from user audio (last 1 second) to trigger response
-            user_cue = user_24k[-24000:] if len(user_24k) > 24000 else user_24k
-            combined = np.concatenate([briefing_np, pause, user_cue])
-            print(f"[Moshi-First] Combined audio: {len(combined)} samples ({len(combined)/24000:.1f}s)", flush=True)
-
-            # Step 4: Send to Moshi S2S
-            await send_status_callback("Responding...")
-            moshi_result = await self.personaplex.generate_filler(user_audio=combined)
-
-            if moshi_result.get("audio"):
-                audio_bytes = moshi_result["audio"]
-                print(f"[Moshi-First] Moshi response: {len(audio_bytes)} bytes", flush=True)
-                await send_audio_callback(audio_bytes)
-                result["personaplex_response"] = moshi_result
-                result["personaplex_used"] = True
-                result["spoken_response"] = knowledge
-                session.add_assistant_message(knowledge)
-            else:
-                # Fallback: send the TTS audio directly
-                print(f"[Moshi-First] No Moshi response, sending TTS directly", flush=True)
+            # If audio is too long (>15s), just use TTS directly
+            if duration_s > 15:
+                print(f"[Moshi-First] Audio too long for Moshi, using TTS directly", flush=True)
                 await send_audio_callback(briefing_audio_bytes)
                 result["spoken_response"] = knowledge
                 session.add_assistant_message(knowledge)
+            else:
+                # Step 4: Send knowledge audio to Moshi S2S
+                await send_status_callback("Moshi responding...")
+                moshi_result = await self.personaplex.generate_filler(user_audio=briefing_np)
+
+                if moshi_result.get("audio"):
+                    audio_bytes = moshi_result["audio"]
+                    print(f"[Moshi-First] Moshi response: {len(audio_bytes)} bytes", flush=True)
+                    await send_audio_callback(audio_bytes)
+                    result["personaplex_response"] = moshi_result
+                    result["personaplex_used"] = True
+                    result["spoken_response"] = knowledge
+                    session.add_assistant_message(knowledge)
+                else:
+                    # Fallback: send the TTS audio directly
+                    print(f"[Moshi-First] No Moshi response, using TTS directly", flush=True)
+                    await send_audio_callback(briefing_audio_bytes)
+                    result["spoken_response"] = knowledge
+                    session.add_assistant_message(knowledge)
         else:
             # TTS failed, use browser fallback
             print(f"[Moshi-First] TTS failed, using browser fallback", flush=True)
