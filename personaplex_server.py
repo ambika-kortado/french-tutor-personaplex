@@ -204,7 +204,7 @@ def _generate_sync(
     global lm_gen, mimi, other_mimi, text_tokenizer, device
 
     # Reset the generator state
-    lm_gen.reset()
+    lm_gen.reset_streaming()
 
     # Set text prompt (the fast part!)
     if text_prompt:
