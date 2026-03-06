@@ -296,6 +296,89 @@ class PersonaPlexTrack:
             print(f"[PersonaPlex] Failed to inject knowledge: {e}", flush=True)
             return False
 
+    async def converse_with_text_prompt(
+        self,
+        user_audio: np.ndarray,
+        text_prompt: str,
+        voice_prompt: str = "NATF2",
+        sample_rate: int = 44100
+    ) -> Dict[str, Any]:
+        """
+        Use PersonaPlex HTTP API to process audio with text prompt conditioning.
+        This injects GPT knowledge directly as text - no TTS needed!
+
+        Args:
+            user_audio: User's audio as float32 numpy array
+            text_prompt: GPT knowledge to condition the response
+            voice_prompt: Voice to use (NATF2, NATM0, etc.)
+            sample_rate: Sample rate of input audio
+        """
+        import aiohttp
+        import tempfile
+        import soundfile as sf
+        import scipy.signal as signal
+
+        start_time = time.time()
+
+        try:
+            # Resample to 24kHz for PersonaPlex
+            if sample_rate != 24000:
+                num_samples_24k = int(len(user_audio) * 24000 / sample_rate)
+                audio_24k = signal.resample(user_audio, num_samples_24k).astype(np.float32)
+            else:
+                audio_24k = user_audio.astype(np.float32)
+
+            # Save to temp WAV file
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                sf.write(f.name, audio_24k, 24000)
+                temp_path = f.name
+
+            # Call PersonaPlex HTTP API
+            api_url = f"http://localhost:{self.moshi_port}/api/process"
+
+            async with aiohttp.ClientSession() as session:
+                with open(temp_path, 'rb') as audio_file:
+                    form_data = aiohttp.FormData()
+                    form_data.add_field('audio', audio_file, filename='input.wav')
+                    form_data.add_field('voice_prompt', voice_prompt)
+                    form_data.add_field('text_prompt', text_prompt)
+
+                    async with session.post(api_url, data=form_data, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status == 200:
+                            result_data = await resp.json()
+                            audio_url = result_data.get('audio_url')
+
+                            if audio_url:
+                                # Fetch the audio
+                                audio_full_url = f"http://localhost:{self.moshi_port}{audio_url}"
+                                async with session.get(audio_full_url) as audio_resp:
+                                    if audio_resp.status == 200:
+                                        audio_bytes = await audio_resp.read()
+                                        latency = (time.time() - start_time) * 1000
+                                        print(f"[PersonaPlex] HTTP API responded in {latency:.0f}ms with text_prompt", flush=True)
+
+                                        # Clean up temp file
+                                        os.unlink(temp_path)
+
+                                        return {
+                                            "text": text_prompt,
+                                            "audio": audio_bytes,
+                                            "latency_ms": latency,
+                                            "method": "http_text_prompt"
+                                        }
+                        else:
+                            error_text = await resp.text()
+                            print(f"[PersonaPlex] HTTP API error {resp.status}: {error_text[:100]}", flush=True)
+
+            # Clean up temp file
+            os.unlink(temp_path)
+
+        except Exception as e:
+            print(f"[PersonaPlex] HTTP API with text_prompt failed: {e}", flush=True)
+
+        # Fallback to WebSocket method
+        return await self.generate_filler(user_audio)
+
     async def converse_with_knowledge(
         self,
         user_audio: np.ndarray,
@@ -768,17 +851,16 @@ class Arbitrator:
         result: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        MOSHI-FIRST MODE: Send [GPT knowledge audio] + [user audio] to Moshi.
+        MOSHI-FIRST MODE: PersonaPlex handles speech, GPT provides knowledge as text prompt.
 
         Flow:
         1. STT user audio → get transcript
         2. GPT generates knowledge from transcript
-        3. TTS knowledge → audio "briefing"
-        4. Send [briefing audio] + [user audio] to Moshi S2S
-        5. Moshi "hears" the knowledge and responds naturally
-        """
-        import scipy.signal as signal
+        3. Send user audio + GPT knowledge (as text_prompt) to PersonaPlex
+        4. PersonaPlex responds naturally, conditioned on the knowledge
 
+        NO TTS NEEDED - knowledge goes directly as text conditioning!
+        """
         await send_status_callback("Processing your question...")
 
         # Step 1: Transcribe user audio
@@ -793,59 +875,70 @@ class Arbitrator:
         print(f"[Moshi-First] User said: {user_text}", flush=True)
 
         # Step 2: Get GPT knowledge
-        await send_status_callback("Thinking...")
+        await send_status_callback("Getting knowledge...")
         llm_result = await self.llm.generate_response(user_text, session)
         knowledge = llm_result.get("text", "")
 
         if not knowledge:
-            await send_status_callback("No response available")
+            # No knowledge needed - just let PersonaPlex respond naturally
+            await send_status_callback("PersonaPlex responding...")
+            moshi_result = await self.personaplex.generate_filler(user_audio=audio)
+            if moshi_result.get("audio"):
+                await send_audio_callback(moshi_result["audio"])
+                result["personaplex_response"] = moshi_result
+                result["personaplex_used"] = True
+            await send_status_callback("Ready - speak when you want!")
             return result
 
         print(f"[Moshi-First] GPT knowledge: {knowledge[:80]}...", flush=True)
         result["claude_response"] = llm_result
         result["claude_used"] = True
 
-        # Step 3: Convert knowledge to audio using Moshi TTS
-        await send_status_callback("Preparing response...")
-        # Just synthesize the knowledge directly
-        briefing_audio_bytes = await self.tts.synthesize(knowledge)
+        # Step 3: Send to PersonaPlex with text_prompt (NO TTS!)
+        await send_status_callback("PersonaPlex responding...")
 
-        if briefing_audio_bytes:
-            # Convert TTS audio (16-bit PCM at 24kHz) to float32
-            briefing_np = np.frombuffer(briefing_audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-            duration_s = len(briefing_np) / 24000
-            print(f"[Moshi-First] Knowledge audio: {len(briefing_np)} samples ({duration_s:.1f}s)", flush=True)
+        # Build text prompt with knowledge
+        text_prompt = f"""You are a knowledgeable history tutor having a conversation.
+Use this knowledge to inform your response: {knowledge}
+Respond naturally and conversationally in 1-2 sentences."""
 
-            # If audio is too long (>15s), just use TTS directly
-            if duration_s > 15:
-                print(f"[Moshi-First] Audio too long for Moshi, using TTS directly", flush=True)
-                await send_audio_callback(briefing_audio_bytes)
-                result["spoken_response"] = knowledge
-                session.add_assistant_message(knowledge)
-            else:
-                # Step 4: Send knowledge audio to Moshi S2S
-                await send_status_callback("Moshi responding...")
-                moshi_result = await self.personaplex.generate_filler(user_audio=briefing_np)
+        # Try HTTP API with text_prompt first
+        moshi_result = await self.personaplex.converse_with_text_prompt(
+            user_audio=audio,
+            text_prompt=text_prompt,
+            voice_prompt="NATF2",
+            sample_rate=sample_rate
+        )
 
-                if moshi_result.get("audio"):
-                    audio_bytes = moshi_result["audio"]
-                    print(f"[Moshi-First] Moshi response: {len(audio_bytes)} bytes", flush=True)
-                    await send_audio_callback(audio_bytes)
-                    result["personaplex_response"] = moshi_result
-                    result["personaplex_used"] = True
-                    result["spoken_response"] = knowledge
-                    session.add_assistant_message(knowledge)
-                else:
-                    # Fallback: send the TTS audio directly
-                    print(f"[Moshi-First] No Moshi response, using TTS directly", flush=True)
-                    await send_audio_callback(briefing_audio_bytes)
-                    result["spoken_response"] = knowledge
-                    session.add_assistant_message(knowledge)
+        if moshi_result.get("audio") and moshi_result.get("method") == "http_text_prompt":
+            # Success! PersonaPlex responded with text conditioning
+            audio_bytes = moshi_result["audio"]
+            print(f"[Moshi-First] PersonaPlex response with text_prompt: {len(audio_bytes)} bytes", flush=True)
+            await send_audio_callback(audio_bytes)
+            result["personaplex_response"] = moshi_result
+            result["personaplex_used"] = True
+            result["spoken_response"] = knowledge
+            session.add_assistant_message(knowledge)
+        elif moshi_result.get("audio"):
+            # Fallback to WebSocket method worked
+            audio_bytes = moshi_result["audio"]
+            print(f"[Moshi-First] PersonaPlex WebSocket response: {len(audio_bytes)} bytes", flush=True)
+            await send_audio_callback(audio_bytes)
+            result["personaplex_response"] = moshi_result
+            result["personaplex_used"] = True
+            result["spoken_response"] = knowledge
+            session.add_assistant_message(knowledge)
         else:
-            # TTS failed, use browser fallback
-            print(f"[Moshi-First] TTS failed, using browser fallback", flush=True)
-            if send_json_callback:
-                await send_json_callback({"type": "response", "text": knowledge})
+            # Final fallback: use TTS
+            print(f"[Moshi-First] PersonaPlex failed, falling back to TTS", flush=True)
+            await send_status_callback("Speaking response...")
+            tts_audio = await self.tts.synthesize(knowledge)
+            if tts_audio:
+                await send_audio_callback(tts_audio)
+            else:
+                # Browser fallback
+                if send_json_callback:
+                    await send_json_callback({"type": "response", "text": knowledge})
             result["spoken_response"] = knowledge
             session.add_assistant_message(knowledge)
 
