@@ -800,10 +800,13 @@ class Arbitrator:
 
         # Send Moshi's immediate response
         if moshi_result.get("audio"):
-            print(f"[Moshi-First] Sending immediate response", flush=True)
-            await send_audio_callback(moshi_result["audio"])
+            audio_bytes = moshi_result["audio"]
+            print(f"[Moshi-First] Sending immediate response: {len(audio_bytes)} bytes", flush=True)
+            await send_audio_callback(audio_bytes)
             result["personaplex_response"] = moshi_result
             result["personaplex_used"] = True
+        else:
+            print(f"[Moshi-First] No audio from Moshi initial response", flush=True)
 
         # Now check if GPT has knowledge ready
         try:
@@ -824,9 +827,16 @@ class Arbitrator:
                 )
 
                 if knowledge_response.get("audio"):
-                    await send_audio_callback(knowledge_response["audio"])
+                    audio_bytes = knowledge_response["audio"]
+                    print(f"[Moshi-First] Sending knowledge response: {len(audio_bytes)} bytes", flush=True)
+                    await send_audio_callback(audio_bytes)
                     result["spoken_response"] = knowledge
                     session.add_assistant_message(knowledge)
+                else:
+                    print(f"[Moshi-First] No audio from knowledge response, using TTS fallback", flush=True)
+                    # Fallback to TTS
+                    if send_json_callback:
+                        await send_json_callback({"type": "response", "text": knowledge})
 
         except asyncio.TimeoutError:
             print(f"[Moshi-First] GPT knowledge timeout", flush=True)
@@ -1001,6 +1011,7 @@ async def websocket_endpoint(websocket: WebSocket):
     audio_buffer = AudioBuffer()
 
     async def send_audio(data: bytes):
+        print(f"[WS] Sending audio to browser: {len(data)} bytes", flush=True)
         await websocket.send_bytes(data)
 
     async def send_status(message: str):
