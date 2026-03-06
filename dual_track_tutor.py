@@ -214,11 +214,13 @@ class PersonaPlexTrack:
 
                     # Get response (with short timeout for filler)
                     response_audio = []
-                    try:
-                        async for msg in asyncio.wait_for(self._recv_moshi_audio(), timeout=0.6):
-                            response_audio.append(msg)
-                    except asyncio.TimeoutError:
-                        pass
+                    deadline = time.time() + 0.6
+                    async for msg in self._recv_moshi_audio():
+                        response_audio.append(msg)
+                        if time.time() > deadline:
+                            break
+                        if len(response_audio) >= 3:  # Got enough audio
+                            break
 
                     if response_audio:
                         audio_bytes = b"".join(response_audio)
@@ -328,16 +330,15 @@ class PersonaPlexTrack:
                     if opus_bytes:
                         await self.moshi_ws.send(b"\x01" + opus_bytes)
 
-                # Collect response audio
+                # Collect response audio with timeout
                 response_audio = []
-                try:
-                    async for audio_chunk in self._recv_moshi_audio():
-                        response_audio.append(audio_chunk)
-                        # Stream chunks as they arrive (for low latency)
-                        if len(response_audio) > 5:  # Start yielding early
-                            break
-                except asyncio.TimeoutError:
-                    pass
+                deadline = time.time() + 2.0  # 2 second timeout for conversation
+                async for audio_chunk in self._recv_moshi_audio():
+                    response_audio.append(audio_chunk)
+                    if time.time() > deadline:
+                        break
+                    if len(response_audio) >= 10:  # Got enough audio
+                        break
 
                 if response_audio:
                     audio_bytes = b"".join(response_audio)
