@@ -403,6 +403,9 @@
 
                     if (rms > BARGE_IN_THRESHOLD) {
                         console.log('BARGE-IN detected! RMS:', rms.toFixed(3));
+                        // Stop monitoring first to prevent duplicate triggers
+                        clearInterval(bargeInCheckInterval);
+                        bargeInCheckInterval = null;
                         // Stop audio and start recording
                         stopAllAudio();
                         startRecording();
@@ -490,11 +493,13 @@
                 console.log('Starting recording...');
 
                 // BARGE-IN: Stop any playing audio when user starts speaking
+                const wasPlaying = isSpeaking;
                 stopAllAudio();
 
-                // Notify server of barge-in to cancel pending tasks
-                if (ws && ws.readyState === WebSocket.OPEN) {
+                // Only send barge-in if we were actually playing audio
+                if (wasPlaying && ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: 'barge_in' }));
+                    console.log('Sent barge-in to server');
                 }
 
                 mediaStream = await navigator.mediaDevices.getUserMedia({
